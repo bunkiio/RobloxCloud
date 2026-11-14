@@ -326,6 +326,7 @@ def play():
         "fps": int(E.get("FPS") or 30), "bitrate": int(E.get("BITRATE") or 3500),
         "h264_fps": int(E.get("H264_FPS") or 60), "h264_bitrate": int(E.get("H264_BITRATE") or 0),
         "cordial_run_url": E.get("CORDIAL_RUN_URL", ""), "cordial_run_sha256": E.get("CORDIAL_RUN_SHA256", ""),
+        "gh_token": E.get("GITHUB_TOKEN", ""), "gh_repo": E.get("GITHUB_REPOSITORY", ""),
     }
     ready = run_setup(cfg)
     if not ready:
