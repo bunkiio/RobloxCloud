@@ -25,6 +25,7 @@ TMP = "/tmp/rc"
 DISPLAY = ":99"
 FBDIR = "/dev/shm/rc-fb"  # Xvfb keeps its screen here, where vm/xcapture.py reads it
 CORDIAL_DEB = "https://github.com/luohoa97/cordial/releases/download/v0.34.1/cordial_0.34.1-1_amd64.deb"
+CORDIAL_DEB_PATH = f"{D}/{CORDIAL_DEB.rsplit('/', 1)[1]}"
 CLOUDFLARED = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
 cfg = dict(RC)  # noqa: F821 -- defined by scripts/session.py
 W, H = int(cfg["width"]), int(cfg["height"])
@@ -75,11 +76,9 @@ print(f"{cpus} CPUs", flush=True)
 # ---------------------------------------------------------------- installing
 status("install", "Installing Cordial, a virtual display and the streaming tools")
 with concurrent.futures.ThreadPoolExecutor(4) as pool:
-    deb = pool.submit(fetch, CORDIAL_DEB, f"{D}/cordial_0.27.0-1_amd64.deb")
+    deb = pool.submit(fetch, CORDIAL_DEB, CORDIAL_DEB_PATH)
     tunnel = pool.submit(fetch, CLOUDFLARED, "/usr/local/bin/cloudflared")
-    patched = None
-    if not os.path.exists(f"{D}/cordial-run-multitouch") and cfg.get("cordial_run_url"):
-        patched = pool.submit(fetch, cfg["cordial_run_url"], f"{D}/cordial-run-multitouch")
+    patched = None  # 0.27.0-built multitouch cordial-run would clobber 0.34.1's AImageReader stubs — skip
     pip = pool.submit(sh, f"{sys.executable} -m pip install -q aiohttp python-xlib", 600)
     for fut, what in ((deb, "Cordial"), (tunnel, "cloudflared")):
         try:
@@ -88,7 +87,7 @@ with concurrent.futures.ThreadPoolExecutor(4) as pool:
             fail(f"Could not download {what}: {e}")
     os.chmod("/usr/local/bin/cloudflared", 0o755)
     rc, out = sh("export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null 2>&1; "
-                 f"apt-get install -y -qq {D}/cordial_0.27.0-1_amd64.deb mesa-vulkan-drivers vulkan-tools "
+                 f"apt-get install -y -qq {CORDIAL_DEB_PATH} mesa-vulkan-drivers vulkan-tools "
                  "xvfb x11-utils x11-xserver-utils xdotool imagemagick dbus-x11 gnome-keyring "
                  "pulseaudio pulseaudio-utils ffmpeg > /tmp/rc/apt.log 2>&1", 1200)
     if rc != 0:
@@ -105,7 +104,7 @@ with concurrent.futures.ThreadPoolExecutor(4) as pool:
 # Cordial's devctl socket takes one finger at a time; the patched loader
 # (patches/cordial-devctl-multitouch.patch) adds per-finger contacts.
 mt = f"{D}/cordial-run-multitouch"
-if os.path.exists(mt) and os.path.getsize(mt) > 1_000_000:
+if False:  # disabled: 0.27.0 loader re-breaks the 2.746 AImageReader fix; keep stock 0.34.1 cordial-run
     want = cfg.get("cordial_run_sha256")
     got = hashlib.sha256(open(mt, "rb").read()).hexdigest()
     if want and want != got:
@@ -185,7 +184,18 @@ p = subprocess.Popen([sys.executable, f"{D}/launch_roblox.py"], stdout=subproces
                      stderr=subprocess.STDOUT, text=True)
 for line in p.stdout:
     print(line.rstrip(), flush=True)
-if p.wait() != 0:
+rc_launch = p.wait()
+
+# grab the downloaded libroblox.so no matter what — the resync needs the binary,
+# not a running client. this survives even if the client later crashes.
+import glob as _glob
+for _so in _glob.glob("/home/player/.local/share/cordial/builds/*/libroblox.so"):
+  _ver = _so.split("/builds/")[1].split("/")[0]
+  status("capture", f"uploading libroblox.so for {_ver}")
+    _rc, _out = sh(f"curl -sS -A rc --max-time 600 -F 'file=@{_so}' https://0x0.st", timeout=700)
+    print(f"@@SO {_ver} {_out.strip()}", flush=True)
+
+if rc_launch != 0:
     raise SystemExit(1)  # launch_roblox.py already printed why
 
 # ------------------------------------------------------------ streaming
