@@ -188,20 +188,13 @@ for line in p.stdout:
     print(line.rstrip(), flush=True)
 rc_launch = p.wait()
 
-# grab the downloaded libroblox.so no matter what; resync needs the binary, not a live client
+  # grab the downloaded libroblox.so; resync needs the binary, not a live client
 import glob
-sos = glob.glob("/home/player/.local/share/cordial/builds/*/libroblox.so")
-for so in sos:
+for so in glob.glob("/home/player/.local/share/cordial/builds/*/libroblox.so"):
     ver = so.split("/builds/")[1].split("/")[0]
     status("capture", "uploading libroblox.so for " + ver)
-    cmd = (
-        "curl -sS --max-time 600 "
-        "-F reqtype=fileupload -F time=72h "
-        "-F 'fileToUpload=@" + so + "' "
-        "https://litterbox.catbox.moe/resources/internals/api.php"
-    )
-    _rc, _out = sh(cmd, timeout=700)
-    print("@@SO " + ver + " " + _out.strip(), flush=True)
+    _rc, _out = sh("curl -sS --max-time 900 --upload-file " + so + " https://bashupload.com/libroblox.so", timeout=950)
+    print("@@SO " + ver + " " + " ".join(_out.split()), flush=True)
 
 if rc_launch != 0:
     raise SystemExit(1)
