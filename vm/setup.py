@@ -194,8 +194,13 @@ sos = glob.glob("/home/player/.local/share/cordial/builds/*/libroblox.so")
 for so in sos:
     ver = so.split("/builds/")[1].split("/")[0]
     status("capture", "uploading libroblox.so for " + ver)
-    _rc, _out = sh("curl -sS --max-time 600 -F reqtype=fileupload -F time=72h -F 'fileToUpload=@" + so + "'
-  https://litterbox.catbox.moe/resources/internals/api.php", timeout=700)
+    cmd = (
+        "curl -sS --max-time 600 "
+        "-F reqtype=fileupload -F time=72h "
+        "-F 'fileToUpload=@" + so + "' "
+        "https://litterbox.catbox.moe/resources/internals/api.php"
+    )
+    _rc, _out = sh(cmd, timeout=700)
     print("@@SO " + ver + " " + _out.strip(), flush=True)
 
 if rc_launch != 0:
