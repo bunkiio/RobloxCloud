@@ -181,22 +181,22 @@ print(f"audio: {audio_source}", flush=True)
 # --------------------------------------------------------------- Roblox
 status("launch", "Opening Cordial")
 p = subprocess.Popen([sys.executable, f"{D}/launch_roblox.py"], stdout=subprocess.PIPE,
-                     stderr=subprocess.STDOUT, text=True)
+                       stderr=subprocess.STDOUT, text=True)
 for line in p.stdout:
     print(line.rstrip(), flush=True)
 rc_launch = p.wait()
 
-# grab the downloaded libroblox.so no matter what — the resync needs the binary,
-# not a running client. this survives even if the client later crashes.
-import glob as _glob
-for _so in _glob.glob("/home/player/.local/share/cordial/builds/*/libroblox.so"):
-  _ver = _so.split("/builds/")[1].split("/")[0]
-  status("capture", f"uploading libroblox.so for {_ver}")
-    _rc, _out = sh(f"curl -sS -A rc --max-time 600 -F 'file=@{_so}' https://0x0.st", timeout=700)
-    print(f"@@SO {_ver} {_out.strip()}", flush=True)
+# grab the downloaded libroblox.so no matter what; resync needs the binary, not a live client
+import glob
+sos = glob.glob("/home/player/.local/share/cordial/builds/*/libroblox.so")
+for so in sos:
+    ver = so.split("/builds/")[1].split("/")[0]
+    status("capture", "uploading libroblox.so for " + ver)
+    _rc, _out = sh("curl -sS -A rc --max-time 600 -F 'file=@" + so + "' https://0x0.st", timeout=700)
+    print("@@SO " + ver + " " + _out.strip(), flush=True)
 
 if rc_launch != 0:
-    raise SystemExit(1)  # launch_roblox.py already printed why
+    raise SystemExit(1)
 
 # ------------------------------------------------------------ streaming
 status("stream", "Starting the stream")
