@@ -86,7 +86,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           # The multi-touch build of Cordial's loader, from build-cordial.yml.
           # Without it phones still work, with one finger at a time.
-          CORDIAL_RUN_URL: https://github.com/${{ github.repository }}/releases/download/cordial-0.27.0-multitouch/cordial-run
+          CORDIAL_RUN_URL: https://github.com/${{ github.repository }}/releases/download/cordial-0.34.1-webview/cordial-run
         run: |
           export WIDTH="${SIZE%%x*}" HEIGHT="${SIZE#*x}"
           python scripts/session.py play
