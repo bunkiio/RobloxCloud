@@ -26,8 +26,8 @@ jobs:
       - uses: actions/checkout@v5
       - name: Fetch Cordial v0.27.0
         run: |
-          git clone --depth 1 --branch v0.34.1 --recurse-submodules --shallow-submodules \
-            https://github.com/luohoa97/cordial.git cordial
+          git clone --depth 1 --branch v0.34.1 https://github.com/luohoa97/cordial.git cordial
+          git -C cordial submodule update --init --recursive --depth 1 || git -C cordial submodule update --init --recursive
           python3 "$GITHUB_WORKSPACE/patches/apply_webview.py" cordial
       - name: Install build dependencies
         run: |
