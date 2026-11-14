@@ -78,7 +78,9 @@ status("install", "Installing Cordial, a virtual display and the streaming tools
 with concurrent.futures.ThreadPoolExecutor(4) as pool:
     deb = pool.submit(fetch, CORDIAL_DEB, CORDIAL_DEB_PATH)
     tunnel = pool.submit(fetch, CLOUDFLARED, "/usr/local/bin/cloudflared")
-    patched = None  # 0.27.0-built multitouch cordial-run would clobber 0.34.1's AImageReader stubs — skip
+    patched = None
+      if not os.path.exists(f"{D}/cordial-run-multitouch") and cfg.get("cordial_run_url"):
+          patched = pool.submit(fetch, cfg["cordial_run_url"], f"{D}/cordial-run-multitouch")
     pip = pool.submit(sh, f"{sys.executable} -m pip install -q aiohttp python-xlib", 600)
     for fut, what in ((deb, "Cordial"), (tunnel, "cloudflared")):
         try:
@@ -104,7 +106,7 @@ with concurrent.futures.ThreadPoolExecutor(4) as pool:
 # Cordial's devctl socket takes one finger at a time; the patched loader
 # (patches/cordial-devctl-multitouch.patch) adds per-finger contacts.
 mt = f"{D}/cordial-run-multitouch"
-if False:  # disabled: 0.27.0 loader re-breaks the 2.746 AImageReader fix; keep stock 0.34.1 cordial-run
+if os.path.exists(mt) and os.path.getsize(mt) > 1_000_000:
     want = cfg.get("cordial_run_sha256")
     got = hashlib.sha256(open(mt, "rb").read()).hexdigest()
     if want and want != got:
