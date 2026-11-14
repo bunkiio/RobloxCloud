@@ -15,7 +15,7 @@ permissions:
   contents: write
 
 env:
-  TAG: cordial-0.27.0-multitouch
+  TAG: cordial-0.34.1-webview
 
 jobs:
   build:
@@ -26,9 +26,9 @@ jobs:
       - uses: actions/checkout@v5
       - name: Fetch Cordial v0.27.0
         run: |
-          git clone --depth 1 --branch v0.27.0 --recurse-submodules --shallow-submodules \
+          git clone --depth 1 --branch v0.34.1 --recurse-submodules --shallow-submodules \
             https://github.com/luohoa97/cordial.git cordial
-          git -C cordial apply "$GITHUB_WORKSPACE/patches/cordial-devctl-multitouch.patch"
+          patch -p1 --fuzz=3 -d cordial < "$GITHUB_WORKSPACE/patches/cordial-devctl-multitouch.patch"
       - name: Install build dependencies
         run: |
           sudo apt-get update
@@ -51,7 +51,7 @@ jobs:
         # the WebView is what shows Roblox's captcha.
         run: |
           cargo build --release --locked -p cordial-runtime --bin cordial-run \
-            --features cordial-runtime/webview,cordial-runtime/vr
+              --features cordial-runtime/webview
           readelf -d target/release/cordial-run | grep -qi webkit
           packaging/check-glibc-floor.sh target/release/cordial-run
       - name: Publish
