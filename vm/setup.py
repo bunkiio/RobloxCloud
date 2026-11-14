@@ -79,8 +79,8 @@ with concurrent.futures.ThreadPoolExecutor(4) as pool:
     deb = pool.submit(fetch, CORDIAL_DEB, CORDIAL_DEB_PATH)
     tunnel = pool.submit(fetch, CLOUDFLARED, "/usr/local/bin/cloudflared")
     patched = None
-      if not os.path.exists(f"{D}/cordial-run-multitouch") and cfg.get("cordial_run_url"):
-          patched = pool.submit(fetch, cfg["cordial_run_url"], f"{D}/cordial-run-multitouch")
+    if not os.path.exists(f"{D}/cordial-run-multitouch") and cfg.get("cordial_run_url"):
+        patched = pool.submit(fetch, cfg["cordial_run_url"], f"{D}/cordial-run-multitouch")
     pip = pool.submit(sh, f"{sys.executable} -m pip install -q aiohttp python-xlib", 600)
     for fut, what in ((deb, "Cordial"), (tunnel, "cloudflared")):
         try:
