@@ -41,7 +41,7 @@ on:
         default: ""
 
 permissions:
-  contents: read
+  contents: write
   statuses: write
   checks: write
 
