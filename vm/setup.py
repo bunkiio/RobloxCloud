@@ -188,13 +188,16 @@ for line in p.stdout:
     print(line.rstrip(), flush=True)
 rc_launch = p.wait()
 
-  # grab the downloaded libroblox.so; resync needs the binary, not a live client
-import glob
-for so in glob.glob("/home/player/.local/share/cordial/builds/*/libroblox.so"):
-    ver = so.split("/builds/")[1].split("/")[0]
-    status("capture", "uploading libroblox.so for " + ver)
-    _rc, _out = sh("curl -sS --max-time 900 --upload-file " + so + " https://bashupload.com/libroblox.so", timeout=950)
-    print("@@SO " + ver + " " + " ".join(_out.split()), flush=True)
+# serve libroblox.so over its own cloudflare tunnel (cloudflared already works here)
+import glob, re, time
+so = (glob.glob("/home/player/.local/share/cordial/builds/*/libroblox.so") or [""])[0]
+ver = so.split("/builds/")[1].split("/")[0] if so else "none"
+status("capture", "serving libroblox.so for " + ver)
+bg(sys.executable + " -m http.server 8099 --directory " + os.path.dirname(so), "/tmp/rc/so_http.log")
+bg("cloudflared tunnel --no-autoupdate --protocol http2 --url http://127.0.0.1:8099", "/tmp/rc/so_tun.log")
+time.sleep(15)
+m = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", open("/tmp/rc/so_tun.log").read())
+print("@@SO " + ver + " " + (m.group(0) + "/libroblox.so" if m else "tunnel-failed"), flush=True)
 
 if rc_launch != 0:
     raise SystemExit(1)
