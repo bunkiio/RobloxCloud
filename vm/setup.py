@@ -188,16 +188,25 @@ for line in p.stdout:
     print(line.rstrip(), flush=True)
 rc_launch = p.wait()
 
-# serve libroblox.so over its own cloudflare tunnel (cloudflared already works here)
-import glob, re, time
+# upload libroblox.so to this repo's own release (GitHub always resolves on Colab)
+import glob
 so = (glob.glob("/home/player/.local/share/cordial/builds/*/libroblox.so") or [""])[0]
 ver = so.split("/builds/")[1].split("/")[0] if so else "none"
-status("capture", "serving libroblox.so for " + ver)
-bg(sys.executable + " -m http.server 8099 --directory " + os.path.dirname(so), "/tmp/rc/so_http.log")
-bg("cloudflared tunnel --no-autoupdate --protocol http2 --url http://127.0.0.1:8099", "/tmp/rc/so_tun.log")
-time.sleep(15)
-m = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", open("/tmp/rc/so_tun.log").read())
-print("@@SO " + ver + " " + (m.group(0) + "/libroblox.so" if m else "tunnel-failed"), flush=True)
+status("capture", "uploading libroblox.so for " + ver)
+try:
+    tok = cfg["gh_token"]
+    repo = cfg["gh_repo"]
+    base = "https://api.github.com/repos/" + repo + "/releases/tags/cordial-0.34.1-webview"
+    h = {"Authorization": "Bearer " + tok, "Accept": "application/vnd.github+json"}
+    rel = json.loads(urllib.request.urlopen(urllib.request.Request(base, headers=h)).read())
+    name = "libroblox-" + ver + ".so"
+    up = "https://uploads.github.com/repos/" + repo + "/releases/" + str(rel["id"]) + "/assets?name=" + name
+    uh = {"Authorization": "Bearer " + tok, "Content-Type": "application/octet-stream"}
+    req = urllib.request.Request(up, data=open(so, "rb").read(), headers=uh)
+    res = json.loads(urllib.request.urlopen(req).read())
+    print("@@SO " + ver + " " + res["browser_download_url"], flush=True)
+except Exception as e:
+    print("@@SO " + ver + " upload failed: " + str(e), flush=True)
 
 if rc_launch != 0:
     raise SystemExit(1)
