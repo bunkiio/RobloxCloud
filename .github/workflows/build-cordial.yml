@@ -28,7 +28,7 @@ jobs:
         run: |
           git clone --depth 1 --branch v0.34.1 --recurse-submodules --shallow-submodules \
             https://github.com/luohoa97/cordial.git cordial
-          patch -p1 --fuzz=3 -d cordial < "$GITHUB_WORKSPACE/patches/cordial-devctl-multitouch.patch"
+          python3 "$GITHUB_WORKSPACE/patches/apply_webview.py" cordial
       - name: Install build dependencies
         run: |
           sudo apt-get update
