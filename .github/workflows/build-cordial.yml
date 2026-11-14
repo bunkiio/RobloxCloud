@@ -28,7 +28,7 @@ jobs:
         run: |
           git clone --depth 1 --branch v0.34.1 https://github.com/luohoa97/cordial.git cordial
           git -C cordial submodule update --init --recursive --depth 1 || git -C cordial submodule update --init --recursive
-          base64 -d "$GITHUB_WORKSPACE/patches/apply_webview.b64" > /tmp/apply_webview.py
+          tr -d '[:space:]' < "$GITHUB_WORKSPACE/patches/apply_webview.b64" | base64 -d > /tmp/apply_webview.py
           python3 /tmp/apply_webview.py cordial
       - name: Install build dependencies
         run: |
