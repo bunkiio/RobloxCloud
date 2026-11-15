@@ -395,7 +395,9 @@ continue
         traceback.print_exc()
 
 # start capture thread (runs in background)
-threading.Thread(target=run_capture_after_delay, daemon=True).start()
+t = threading.Thread(target=run_capture_after_delay, daemon=False)
+t.start()
+print("@@STATUS capture Thread started, ID=" + str(t.ident), flush=True)
 print("capture will start in 90 seconds - JOIN A GAME NOW", flush=True)
 
 print("@@READY " + json.dumps({"url": url, "gpu": gpu_name, "cpus": cpus}), flush=True)
