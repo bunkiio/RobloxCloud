@@ -381,8 +381,7 @@ continue
     try:
         cap_data = open("/tmp/captures.zip", "rb").read()
         h = {"Authorization": "Bearer " + cfg["gh_token"], "Content-Type": "application/octet-stream"}
-        up = "https://uploads.github.com/repos/" + cfg["gh_repo"] + "/releases/" + str(rel["id"]) +
-"/assets?name=captures-746.zip"
+        up = "https://uploads.github.com/repos/" + cfg["gh_repo"] + "/releases/" + str(rel["id"]) +  "/assets?name=captures-746.zip"
         req = urllib.request.Request(up, data=cap_data, headers=h)
         urllib.request.urlopen(req)
         print("@@STATUS capture uploaded to release", flush=True)
