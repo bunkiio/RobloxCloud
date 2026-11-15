@@ -267,52 +267,74 @@ while True:
 
 print("@@READY " + json.dumps({"url": url, "gpu": gpu_name, "cpus": cpus}), flush=True)
 
-# ------------------------------------------------------------ capture
-# wait for user to join a game, then capture
+# ------------------------------------------------------------ capture (threaded)
+import threading
 import sys
 
-print("@@STATUS capture Will capture in 120 seconds - JOIN A GAME NOW", flush=True)
-sys.stdout.flush()
+def run_capture():
+    # force unbuffered output
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, line_buffering=True)
 
-time.sleep(300)
+    try:
+        time.sleep(180)  # 3 minutes
 
-print("@@STATUS capture Starting capture...", flush=True)
-sys.stdout.flush()
+        print("@@STATUS capture Starting...", flush=True)
 
-rc, out = sh("pgrep -f libroblox")
-print(f"@@STATUS capture pgrep: {out}", flush=True)
-pid = out.strip().split('\n')[0] if out.strip() else None
+        # find roblox - it might have a different PID now
+        for attempt in range(3):
+            rc, out = sh("pgrep -f 'com.roblox'")
+            if rc == 0 and out.strip():
+                break
+            rc, out = sh("pgrep -f 'libroblox'")
+            if rc == 0 and out.strip():
+                break
+            time.sleep(5)
 
-if pid:
-    print(f"@@STATUS capture Found PID {pid}", flush=True)
+        pid = out.strip().split('\n')[0] if out.strip() else None
+        print(f"@@STATUS capture PID={pid}", flush=True)
 
-    capture_gdb = '''
+        if not pid:
+            print("@@STATUS capture No process found", flush=True)
+            return
+
+        # verify process exists
+        rc, _ = sh(f"ls /proc/{pid}/maps")
+        if rc != 0:
+            print(f"@@STATUS capture PID {pid} not valid", flush=True)
+            return
+
+        # simple gdb test - just get BASE
+        gdb_script = f'''
 set pagination off
-set confirm off
 python
-import gdb, os
-RUN = "/tmp/cap746"
-os.makedirs(RUN, exist_ok=True)
-pid = gdb.selected_inferior().pid
+import gdb
+pid = {pid}
 BASE = None
 for line in open(f"/proc/{pid}/maps"):
-    if "libroblox.so" in line and line.split()[2] == "00000000":
+    if "libroblox.so" in line and "00000000" in line.split()[2]:
         BASE = int(line.split("-")[0], 16)
         break
-print(f"BASE={hex(BASE) if BASE else 'NOT FOUND'}")
-if BASE:
-    open(f"{RUN}/base.txt", "w").write(hex(BASE))
+print(f"CAPTURE_BASE={{hex(BASE) if BASE else 'NONE'}}")
 end
 quit
 '''
-    open("/tmp/test.gdb", "w").write(capture_gdb)
+        open("/tmp/cap.gdb", "w").write(gdb_script)
 
-    rc, out = sh(f"timeout 30 gdb -p {pid} -x /tmp/test.gdb 2>&1", timeout=40)
-    print(f"@@STATUS capture gdb output: {out[-1500:]}", flush=True)
+        rc, out = sh(f"gdb -p {pid} -x /tmp/cap.gdb 2>&1", timeout=60)
+        print(f"@@STATUS capture result: {out[-800:]}", flush=True)
 
-    rc, out = sh("cat /tmp/cap746/base.txt 2>/dev/null || echo 'no base file'")
-    print(f"@@STATUS capture base: {out}", flush=True)
-else:
-    print("@@STATUS capture ERROR: no roblox process", flush=True)
+    except Exception as e:
+        print(f"@@STATUS capture ERROR: {e}", flush=True)
 
-print("@@STATUS capture done", flush=True)
+capture_thread = threading.Thread(target=run_capture, daemon=True)
+capture_thread.start()
+
+print("@@READY " + json.dumps({"url": url, "gpu": gpu_name, "cpus": cpus}), flush=True)
+print("@@STATUS capture Thread started - join a game within 3 minutes", flush=True)
+
+# keep the main script alive so the daemon thread can run
+while capture_thread.is_alive():
+    time.sleep(5)
+
+print("@@STATUS capture Thread finished", flush=True)
