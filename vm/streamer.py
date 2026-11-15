@@ -683,6 +683,24 @@ class Streamer:
         return web.json_response({"ok": True, "game": self.screen.roblox is not None,
                                   "stopped": self.stopped, "h264": self.h264_ok},
                                  headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-store"})
+    async def run_capture(self, request):
+        """Run the capture script and return results."""
+        import subprocess
+        log("capture: starting...")
+        try:
+            result = subprocess.run(
+                ["python3", "/content/rc/capture.py"],
+                capture_output=True,
+                text=True,
+                timeout=150
+            )
+            output = result.stdout + "\n" + result.stderr
+            log(f"capture: done, rc={result.returncode}")
+            return web.Response(text=output, content_type="text/plain")
+        except subprocess.TimeoutExpired:
+            return web.Response(text="Capture timed out after 150 seconds", status=500)
+        except Exception as e:
+            return web.Response(text=f"Capture error: {e}", status=500)
 
     async def video_ws(self, request):
         return await self.viewer_ws(request, self.video)
