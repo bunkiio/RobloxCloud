@@ -272,7 +272,7 @@ import threading
 def run_capture_after_delay():
     try:
         print("@@STATUS capture Waiting 180 seconds before capture...", flush=True)
-        time.sleep(180)
+        time.sleep(360)
         print("@@STATUS capture Starting gdb capture...", flush=True)
 
         # find roblox PID
