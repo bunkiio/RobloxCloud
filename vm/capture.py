@@ -9,21 +9,41 @@ def sh(cmd, timeout=60):
 
 print("=== ROBLOX CAPTURE ===")
 
-rc, out = sh("pgrep -f libroblox")
-pid = out.strip().split('\n')[0] if out.strip() else None
+# find process with libroblox.so loaded
+print("Looking for process with libroblox.so...")
+
+pid = None
+for attempt in range(30):
+    # get all candidate PIDs
+    rc, out = sh("pgrep -f 'com.roblox\\|RobloxApp\\|libroblox' 2>/dev/null")
+    pids = out.strip().split('\n') if out.strip() else []
+    
+    for p in pids:
+        p = p.strip()
+        if not p:
+            continue
+        # check if this process has libroblox.so
+        rc2, maps = sh(f"grep libroblox.so /proc/{p}/maps 2>/dev/null")
+        if "libroblox.so" in maps:
+            pid = p
+            break
+    
+    if pid:
+        break
+    
+    print(f"  attempt {attempt+1}/30 - no libroblox.so yet, waiting...")
+    time.sleep(2)
 
 if not pid:
-    print("ERROR: No Roblox process found")
+    print("ERROR: No process with libroblox.so found after 60 seconds")
+    print("Make sure you're in a game!")
     exit(1)
 
-print(f"PID: {pid}")
+print(f"Found PID: {pid}")
 
+# double check
 rc, maps = sh(f"grep libroblox.so /proc/{pid}/maps 2>/dev/null | head -1")
-if "libroblox.so" not in maps:
-    print("ERROR: libroblox.so not loaded")
-    exit(1)
-
-print("libroblox.so loaded, starting gdb...")
+print(f"Map line: {maps[:100]}...")
 
 os.makedirs("/tmp/cap746", exist_ok=True)
 
