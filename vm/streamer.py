@@ -1030,6 +1030,7 @@ def main():
     app.router.add_get("/video", st.video_ws)
     app.router.add_get("/video264", st.h264_ws)
     app.router.add_get("/audio", st.audio_ws)
+    app.router.add_get("/capture", st.run_capture)
     app.router.add_get("/ctl", st.ctl_ws)
     app.router.add_get("/", lambda r: web.Response(text="RobloxCloud streamer\n"))
 
