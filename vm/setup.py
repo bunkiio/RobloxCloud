@@ -265,139 +265,54 @@ while True:
             fail(f"The tunnel at {url} did not answer: {e}")
         time.sleep(2)
 
-# ------------------------------------------------------------ auto-capture
-# after Roblox connects and plays for a bit, attach gdb and capture
-import threading
+print("@@READY " + json.dumps({"url": url, "gpu": gpu_name, "cpus": cpus}), flush=True)
 
-def run_capture_after_delay():
-    try:
-        print("@@STATUS capture Waiting 180 seconds before capture...", flush=True)
-        time.sleep(360)
-        print("@@STATUS capture Starting gdb capture...", flush=True)
+# ------------------------------------------------------------ capture
+# wait for user to join a game, then capture
+import sys
 
-        # find roblox PID
-        rc, out = sh("pgrep -f libroblox")
-        print(f"@@STATUS capture pgrep result: rc={rc} out={out}", flush=True)
-        pid = out.strip().split('\n')[0] if out.strip() else None
+print("@@STATUS capture Will capture in 120 seconds - JOIN A GAME NOW", flush=True)
+sys.stdout.flush()
 
-        if not pid:
-            print("@@STATUS capture ERROR: No Roblox process found", flush=True)
-            return
+time.sleep(120)
 
-        print(f"@@STATUS capture Found PID {pid}, writing gdb script...", flush=True)
+print("@@STATUS capture Starting capture...", flush=True)
+sys.stdout.flush()
 
-        # write the capture script
-        capture_gdb = '''
+rc, out = sh("pgrep -f libroblox")
+print(f"@@STATUS capture pgrep: {out}", flush=True)
+pid = out.strip().split('\n')[0] if out.strip() else None
+
+if pid:
+    print(f"@@STATUS capture Found PID {pid}", flush=True)
+
+    capture_gdb = '''
 set pagination off
 set confirm off
-
 python
-import gdb, os, time
-
+import gdb, os
 RUN = "/tmp/cap746"
 os.makedirs(RUN, exist_ok=True)
-LOG = open(os.path.join(RUN, "index.txt"), "a", buffering=1)
-T0 = time.monotonic()
-
-def u8(a): return int.from_bytes(gdb.selected_inferior().read_memory(a, 1).tobytes(), "little")
-def u64(a): return int.from_bytes(gdb.selected_inferior().read_memory(a, 8).tobytes(), "little")
-def rd(a, n):
-    try:
-        return gdb.selected_inferior().read_memory(a, n).tobytes()
-    except:
-        return b""
-
 pid = gdb.selected_inferior().pid
 BASE = None
 for line in open(f"/proc/{pid}/maps"):
     if "libroblox.so" in line and line.split()[2] == "00000000":
         BASE = int(line.split("-")[0], 16)
         break
-
-if BASE is None:
-    print("ERROR: no libroblox base")
-    gdb.execute("quit")
-
-LOG.write(f"# BASE={hex(BASE)} pid={pid}\\n")
-print(f"BASE={hex(BASE)}")
-
-CNT = {"chal": 0, "a7": 0}
-DEADLINE = T0 + 120
-
-def maybe_quit():
-    if time.monotonic() > DEADLINE:
-        LOG.write("# deadline\\n")
-        gdb.execute("detach")
-        gdb.execute("quit")
-
-class BlobBp(gdb.Breakpoint):
-    def stop(self):
-        try:
-            rsi = int(gdb.parse_and_eval("$rsi"))
-            flag = u8(rsi)
-            if flag & 1:
-                ptr, ln = u64(rsi+16), u64(rsi+8)
-            else:
-                ln, ptr = flag>>1, rsi+1
-            if 0 < ln < 100000:
-                blob = rd(ptr, ln)
-                idx = CNT["chal"]; CNT["chal"] += 1
-                open(f"{RUN}/chal_{idx:04d}.bin", "wb").write(blob)
-                LOG.write(f"CHAL {idx} {ln}B\\n")
-                print(f"[CHAL] {ln}B")
-        except Exception as e:
-            LOG.write(f"ERR {e}\\n")
-        maybe_quit()
-        return False
-
-class A7Bp(gdb.Breakpoint):
-    def stop(self):
-        try:
-            rdi = int(gdb.parse_and_eval("$rdi"))
-            idx = CNT["a7"]; CNT["a7"] += 1
-            if 0x1000 < rdi < 0x800000000000:
-                ctx = rd(rdi, 512)
-                open(f"{RUN}/a7_{idx:04d}.bin", "wb").write(ctx)
-                LOG.write(f"A7 {idx}\\n")
-                print(f"[A7] ctx captured")
-        except Exception as e:
-            LOG.write(f"ERR {e}\\n")
-        maybe_quit()
-        return False
-
-BlobBp(f"*{BASE + 0x427a7d4}")
-A7Bp(f"*{BASE + 0x6152814}")
-print("capture ready")
+print(f"BASE={hex(BASE) if BASE else 'NOT FOUND'}")
+if BASE:
+    open(f"{RUN}/base.txt", "w").write(hex(BASE))
 end
-
-continue
+quit
 '''
-        open("/tmp/capture.gdb", "w").write(capture_gdb)
-        print("@@STATUS capture Running gdb...", flush=True)
+    open("/tmp/test.gdb", "w").write(capture_gdb)
 
-        # run gdb
-        rc, out = sh(f"timeout 130 gdb -p {pid} -x /tmp/capture.gdb 2>&1", timeout=140)
-        print(f"@@STATUS capture gdb finished rc={rc}", flush=True)
-        print(out[-2000:], flush=True)
+    rc, out = sh(f"timeout 30 gdb -p {pid} -x /tmp/test.gdb 2>&1", timeout=40)
+    print(f"@@STATUS capture gdb output: {out[-1500:]}", flush=True)
 
-        # check what we got
-        sh("ls -la /tmp/cap746/")
-        rc, out = sh("ls -la /tmp/cap746/")
-        print(f"@@STATUS capture files: {out}", flush=True)
+    rc, out = sh("cat /tmp/cap746/base.txt 2>/dev/null || echo 'no base file'")
+    print(f"@@STATUS capture base: {out}", flush=True)
+else:
+    print("@@STATUS capture ERROR: no roblox process", flush=True)
 
-        # zip results
-        sh("zip -r /tmp/captures.zip /tmp/cap746/")
-        print("@@STATUS capture zipped", flush=True)
-
-    except Exception as e:
-        print(f"@@STATUS capture EXCEPTION: {e}", flush=True)
-        import traceback
-        traceback.print_exc()
-
-# start capture thread (runs in background)
-t = threading.Thread(target=run_capture_after_delay, daemon=False)
-t.start()
-print("@@STATUS capture Thread started, ID=" + str(t.ident), flush=True)
-print("capture will start in 90 seconds - JOIN A GAME NOW", flush=True)
-
-print("@@READY " + json.dumps({"url": url, "gpu": gpu_name, "cpus": cpus}), flush=True)
+print("@@STATUS capture done", flush=True)
