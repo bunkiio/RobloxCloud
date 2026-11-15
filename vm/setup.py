@@ -274,7 +274,7 @@ import sys
 print("@@STATUS capture Will capture in 120 seconds - JOIN A GAME NOW", flush=True)
 sys.stdout.flush()
 
-time.sleep(120)
+time.sleep(360)
 
 print("@@STATUS capture Starting capture...", flush=True)
 sys.stdout.flush()
