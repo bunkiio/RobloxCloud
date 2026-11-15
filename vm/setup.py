@@ -91,7 +91,7 @@ with concurrent.futures.ThreadPoolExecutor(4) as pool:
     rc, out = sh("export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null 2>&1; "
                  f"apt-get install -y -qq {CORDIAL_DEB_PATH} mesa-vulkan-drivers vulkan-tools "
                  "xvfb x11-utils x11-xserver-utils xdotool imagemagick dbus-x11 gnome-keyring "
-                 "pulseaudio pulseaudio-utils ffmpeg > /tmp/rc/apt.log 2>&1", 1200)
+                 "pulseaudio pulseaudio-utils ffmpeg gdb > /tmp/rc/apt.log 2>&1", 1200)
     if rc != 0:
         fail("Installing packages failed: " + open("/tmp/rc/apt.log").read()[-300:])
     rc, out = pip.result()
@@ -274,7 +274,7 @@ import sys
 print("@@STATUS capture Will capture in 120 seconds - JOIN A GAME NOW", flush=True)
 sys.stdout.flush()
 
-time.sleep(360)
+time.sleep(300)
 
 print("@@STATUS capture Starting capture...", flush=True)
 sys.stdout.flush()
