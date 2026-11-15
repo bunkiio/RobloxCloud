@@ -270,7 +270,7 @@ while True:
 import threading
 
 def run_capture_after_delay():
-    time.sleep(180)  # wait 90 seconds for you to join a game
+    time.sleep(300)  # wait 90 seconds for you to join a game
     print("@@STATUS capture Starting gdb capture...", flush=True)
 
     # find roblox PID
