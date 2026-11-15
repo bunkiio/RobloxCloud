@@ -265,4 +265,132 @@ while True:
             fail(f"The tunnel at {url} did not answer: {e}")
         time.sleep(2)
 
+# ------------------------------------------------------------ auto-capture
+# after Roblox connects and plays for a bit, attach gdb and capture
+import threading
+
+def run_capture_after_delay():
+    time.sleep(90)  # wait 90 seconds for you to join a game
+    print("@@STATUS capture Starting gdb capture...", flush=True)
+
+    # find roblox PID
+    rc, out = sh("pgrep -f libroblox")
+    pid = out.strip().split('\n')[0] if out.strip() else None
+
+    if not pid:
+        print("@@STATUS capture No Roblox process found", flush=True)
+        return
+
+    # write the capture script
+    capture_gdb = '''
+set pagination off
+set confirm off
+
+python
+import gdb, os, time
+
+RUN = "/tmp/cap746"
+os.makedirs(RUN, exist_ok=True)
+LOG = open(os.path.join(RUN, "index.txt"), "a", buffering=1)
+T0 = time.monotonic()
+
+def u8(a): return int.from_bytes(gdb.selected_inferior().read_memory(a, 1).tobytes(), "little")
+def u64(a): return int.from_bytes(gdb.selected_inferior().read_memory(a, 8).tobytes(), "little")
+def rd(a, n):
+    try:
+        return gdb.selected_inferior().read_memory(a, n).tobytes()
+    except:
+        return b""
+
+pid = gdb.selected_inferior().pid
+BASE = None
+for line in open(f"/proc/{pid}/maps"):
+    if "libroblox.so" in line and line.split()[2] == "00000000":
+        BASE = int(line.split("-")[0], 16)
+        break
+
+if BASE is None:
+    print("ERROR: no libroblox base")
+    gdb.execute("quit")
+
+LOG.write(f"# BASE={hex(BASE)} pid={pid}\\n")
+print(f"BASE={hex(BASE)}")
+
+CNT = {"chal": 0, "a7": 0}
+DEADLINE = T0 + 120
+
+def maybe_quit():
+    if time.monotonic() > DEADLINE:
+        LOG.write("# deadline\\n")
+        gdb.execute("detach")
+        gdb.execute("quit")
+
+class BlobBp(gdb.Breakpoint):
+    def stop(self):
+        try:
+            rsi = int(gdb.parse_and_eval("$rsi"))
+            flag = u8(rsi)
+            if flag & 1:
+                ptr, ln = u64(rsi+16), u64(rsi+8)
+            else:
+                ln, ptr = flag>>1, rsi+1
+            if 0 < ln < 100000:
+                blob = rd(ptr, ln)
+                idx = CNT["chal"]; CNT["chal"] += 1
+                open(f"{RUN}/chal_{idx:04d}.bin", "wb").write(blob)
+                LOG.write(f"CHAL {idx} {ln}B\\n")
+                print(f"[CHAL] {ln}B")
+        except Exception as e:
+            LOG.write(f"ERR {e}\\n")
+        maybe_quit()
+        return False
+
+class A7Bp(gdb.Breakpoint):
+    def stop(self):
+        try:
+            rdi = int(gdb.parse_and_eval("$rdi"))
+            idx = CNT["a7"]; CNT["a7"] += 1
+            if 0x1000 < rdi < 0x800000000000:
+                ctx = rd(rdi, 512)
+                open(f"{RUN}/a7_{idx:04d}.bin", "wb").write(ctx)
+                LOG.write(f"A7 {idx}\\n")
+                print(f"[A7] ctx captured")
+        except Exception as e:
+            LOG.write(f"ERR {e}\\n")
+        maybe_quit()
+        return False
+
+BlobBp(f"*{BASE + 0x427a7d4}")
+A7Bp(f"*{BASE + 0x6152814}")
+print("capture ready")
+end
+
+continue
+'''
+    open("/tmp/capture.gdb", "w").write(capture_gdb)
+
+    # run gdb
+    rc, out = sh(f"timeout 130 gdb -p {pid} -x /tmp/capture.gdb 2>&1", timeout=140)
+    print(out[-2000:], flush=True)
+
+    # zip results
+    sh("zip -r /tmp/captures.zip /tmp/cap746/")
+    print("@@STATUS capture done, results in /tmp/captures.zip", flush=True)
+
+    # upload to release
+    try:
+        cap_data = open("/tmp/captures.zip", "rb").read()
+        h = {"Authorization": "Bearer " + cfg["gh_token"], "Content-Type": "application/octet-stream"}
+        up = "https://uploads.github.com/repos/" + cfg["gh_repo"] + "/releases/" + str(rel["id"]) +
+"/assets?name=captures-746.zip"
+        req = urllib.request.Request(up, data=cap_data, headers=h)
+        urllib.request.urlopen(req)
+        print("@@STATUS capture uploaded to release", flush=True)
+    except Exception as e:
+        print(f"@@STATUS capture upload failed: {e}", flush=True)
+
+# start capture thread (runs in background)
+threading.Thread(target=run_capture_after_delay, daemon=True).start()
+print("capture will start in 90 seconds - JOIN A GAME NOW", flush=True)
+
 print("@@READY " + json.dumps({"url": url, "gpu": gpu_name, "cpus": cpus}), flush=True)
