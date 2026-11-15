@@ -272,10 +272,6 @@ import threading
 import sys
 
 def run_capture():
-    # force unbuffered output
-    import io
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, line_buffering=True)
-
     try:
         time.sleep(180)  # 3 minutes
 
