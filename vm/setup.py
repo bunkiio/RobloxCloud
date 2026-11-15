@@ -270,19 +270,24 @@ while True:
 import threading
 
 def run_capture_after_delay():
-    time.sleep(600)  # wait 90 seconds for you to join a game
-    print("@@STATUS capture Starting gdb capture...", flush=True)
+    try:
+        print("@@STATUS capture Waiting 180 seconds before capture...", flush=True)
+        time.sleep(180)
+        print("@@STATUS capture Starting gdb capture...", flush=True)
 
-    # find roblox PID
-    rc, out = sh("pgrep -f libroblox")
-    pid = out.strip().split('\n')[0] if out.strip() else None
+        # find roblox PID
+        rc, out = sh("pgrep -f libroblox")
+        print(f"@@STATUS capture pgrep result: rc={rc} out={out}", flush=True)
+        pid = out.strip().split('\n')[0] if out.strip() else None
 
-    if not pid:
-        print("@@STATUS capture No Roblox process found", flush=True)
-        return
+        if not pid:
+            print("@@STATUS capture ERROR: No Roblox process found", flush=True)
+            return
 
-    # write the capture script
-    capture_gdb = '''
+        print(f"@@STATUS capture Found PID {pid}, writing gdb script...", flush=True)
+
+        # write the capture script
+        capture_gdb = '''
 set pagination off
 set confirm off
 
@@ -367,26 +372,27 @@ end
 
 continue
 '''
-    open("/tmp/capture.gdb", "w").write(capture_gdb)
+        open("/tmp/capture.gdb", "w").write(capture_gdb)
+        print("@@STATUS capture Running gdb...", flush=True)
 
-    # run gdb
-    rc, out = sh(f"timeout 130 gdb -p {pid} -x /tmp/capture.gdb 2>&1", timeout=140)
-    print(out[-2000:], flush=True)
+        # run gdb
+        rc, out = sh(f"timeout 130 gdb -p {pid} -x /tmp/capture.gdb 2>&1", timeout=140)
+        print(f"@@STATUS capture gdb finished rc={rc}", flush=True)
+        print(out[-2000:], flush=True)
 
-    # zip results
-    sh("zip -r /tmp/captures.zip /tmp/cap746/")
-    print("@@STATUS capture done, results in /tmp/captures.zip", flush=True)
+        # check what we got
+        sh("ls -la /tmp/cap746/")
+        rc, out = sh("ls -la /tmp/cap746/")
+        print(f"@@STATUS capture files: {out}", flush=True)
 
-    # upload to release
-    try:
-        cap_data = open("/tmp/captures.zip", "rb").read()
-        h = {"Authorization": "Bearer " + cfg["gh_token"], "Content-Type": "application/octet-stream"}
-        up = "https://uploads.github.com/repos/" + cfg["gh_repo"] + "/releases/" + str(rel["id"]) +  "/assets?name=captures-746.zip"
-        req = urllib.request.Request(up, data=cap_data, headers=h)
-        urllib.request.urlopen(req)
-        print("@@STATUS capture uploaded to release", flush=True)
+        # zip results
+        sh("zip -r /tmp/captures.zip /tmp/cap746/")
+        print("@@STATUS capture zipped", flush=True)
+
     except Exception as e:
-        print(f"@@STATUS capture upload failed: {e}", flush=True)
+        print(f"@@STATUS capture EXCEPTION: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
 
 # start capture thread (runs in background)
 threading.Thread(target=run_capture_after_delay, daemon=True).start()
