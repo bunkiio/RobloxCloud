@@ -7,173 +7,38 @@ def sh(cmd, timeout=60):
     r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
     return r.returncode, (r.stdout + r.stderr).strip()
 
-print("=== ROBLOX CAPTURE ===")
+print("=== ROBLOX CAPTURE DEBUG ===")
 
-# find process with libroblox.so loaded
-print("Looking for process with libroblox.so...")
-
-pid = None
-for attempt in range(30):
-    # get all candidate PIDs
-    rc, out = sh("pgrep -f 'com.roblox\\|RobloxApp\\|libroblox' 2>/dev/null")
-    pids = out.strip().split('\n') if out.strip() else []
-    
-    for p in pids:
-        p = p.strip()
-        if not p:
-            continue
-        # check if this process has libroblox.so
-        rc2, maps = sh(f"grep libroblox.so /proc/{p}/maps 2>/dev/null")
-        if "libroblox.so" in maps:
-            pid = p
-            break
-    
-    if pid:
-        break
-    
-    print(f"  attempt {attempt+1}/30 - no libroblox.so yet, waiting...")
-    time.sleep(2)
-
-if not pid:
-    print("ERROR: No process with libroblox.so found after 60 seconds")
-    print("Make sure you're in a game!")
-    exit(1)
-
-print(f"Found PID: {pid}")
-
-# double check
-rc, maps = sh(f"grep libroblox.so /proc/{pid}/maps 2>/dev/null | head -1")
-print(f"Map line: {maps[:100]}...")
-
-os.makedirs("/tmp/cap746", exist_ok=True)
-
-gdb_script = r'''
-set pagination off
-set confirm off
-
-python
-import gdb, os, time
-
-RUN = "/tmp/cap746"
-pid = gdb.selected_inferior().pid
-print(f"Attached to {pid}")
-
-BASE = None
-for line in open(f"/proc/{pid}/maps"):
-    if "libroblox.so" in line:
-        parts = line.split()
-        if len(parts) >= 3 and parts[2] == "00000000":
-            BASE = int(parts[0].split("-")[0], 16)
-            break
-
-if not BASE:
-    print("ERROR: no BASE")
-    gdb.execute("quit")
-
-print(f"BASE = {hex(BASE)}")
-open(f"{RUN}/base.txt", "w").write(hex(BASE))
-
-def u8(a):
-    return int.from_bytes(gdb.selected_inferior().read_memory(a, 1).tobytes(), "little")
-
-def u64(a):
-    return int.from_bytes(gdb.selected_inferior().read_memory(a, 8).tobytes(), "little")
-
-def rd(a, n):
-    try:
-        return gdb.selected_inferior().read_memory(a, n).tobytes()
-    except:
-        return b""
-
-LOG = open(f"{RUN}/log.txt", "w")
-CNT = {"chal": 0, "a7": 0, "ans": 0}
-T0 = time.monotonic()
-DEADLINE = T0 + 90
-
-class BlobBp(gdb.Breakpoint):
-    def stop(self):
-        try:
-            rsi = int(gdb.parse_and_eval("$rsi"))
-            flag = u8(rsi)
-            if flag & 1:
-                ptr, length = u64(rsi + 16), u64(rsi + 8)
-            else:
-                length, ptr = flag >> 1, rsi + 1
-            if 0 < length < 100000 and 0x1000 < ptr:
-                blob = rd(ptr, length)
-                idx = CNT["chal"]
-                CNT["chal"] += 1
-                open(f"{RUN}/chal_{idx:04d}.bin", "wb").write(blob)
-                print(f"[CHAL] #{idx} {length}B")
-                LOG.write(f"CHAL {idx} {length}B\n")
-                LOG.flush()
-        except Exception as e:
-            print(f"[CHAL ERR] {e}")
-        if time.monotonic() > DEADLINE:
-            gdb.execute("quit")
-        return False
-
-class A7Bp(gdb.Breakpoint):
-    def stop(self):
-        try:
-            rdi = int(gdb.parse_and_eval("$rdi"))
-            idx = CNT["a7"]
-            CNT["a7"] += 1
-            if 0x1000 < rdi:
-                ctx = rd(rdi, 512)
-                open(f"{RUN}/a7_{idx:04d}.bin", "wb").write(ctx)
-                print(f"[A7] #{idx}")
-                LOG.write(f"A7 {idx}\n")
-                LOG.flush()
-        except Exception as e:
-            print(f"[A7 ERR] {e}")
-        if time.monotonic() > DEADLINE:
-            gdb.execute("quit")
-        return False
-
-class AnsBp(gdb.Breakpoint):
-    def stop(self):
-        try:
-            rax = int(gdb.parse_and_eval("$rax"))
-            idx = CNT["ans"]
-            CNT["ans"] += 1
-            print(f"[ANS] #{idx} rax={hex(rax)}")
-            LOG.write(f"ANS {idx} {hex(rax)}\n")
-            LOG.flush()
-            if 0x1000 < rax:
-                open(f"{RUN}/ans_{idx:04d}.bin", "wb").write(rd(rax, 64))
-        except Exception as e:
-            print(f"[ANS ERR] {e}")
-        if time.monotonic() > DEADLINE:
-            gdb.execute("quit")
-        return False
-
-print("Setting breakpoints...")
-BlobBp(f"*{BASE + 0x427a7d4}")
-A7Bp(f"*{BASE + 0x6152814}")
-AnsBp(f"*{BASE + 0x429b2f9}")
-print("Breakpoints set. Running for 90 seconds...")
-print("Rejoin a game to trigger capture!")
-LOG.write("started\n")
-LOG.flush()
-end
-
-continue
-'''
-
-open("/tmp/cap.gdb", "w").write(gdb_script)
-
-print("\nRunning gdb for 90 seconds...")
-rc, out = sh("gdb -p " + pid + " -x /tmp/cap.gdb 2>&1", timeout=120)
+# show all processes
+print("\n--- All processes ---")
+rc, out = sh("ps aux | head -50")
 print(out)
 
-print("\n=== FILES ===")
-rc, out = sh("ls -la /tmp/cap746/")
+print("\n--- Processes with 'roblox' in name (case insensitive) ---")
+rc, out = sh("ps aux | grep -i roblox")
 print(out)
 
-print("\n=== LOG ===")
-rc, out = sh("cat /tmp/cap746/log.txt 2>/dev/null || echo 'no log'")
+print("\n--- Processes with 'cordial' in name ---")
+rc, out = sh("ps aux | grep -i cordial")
 print(out)
 
-sh("zip -r /tmp/captures.zip /tmp/cap746/")
-print("\nSaved to /tmp/captures.zip")
+print("\n--- All pgrep results ---")
+rc, out = sh("pgrep -a '.' 2>/dev/null | head -30")
+print(out)
+
+print("\n--- Looking for any .so files in any process maps ---")
+rc, out = sh("for p in $(ls /proc | grep -E '^[0-9]+$' | head -20); do echo \"=== PID $p ===\"; cat /proc/$p/maps 2>/dev/null | grep -E '\\.so' | head -5; done")
+print(out[:3000])
+
+print("\n--- Specifically looking for libroblox ---")
+rc, out = sh("for p in $(ls /proc | grep -E '^[0-9]+$'); do grep -l libroblox /proc/$p/maps 2>/dev/null && echo \"Found in PID $p\"; done")
+print(out if out else "Not found in any process")
+
+print("\n--- Cordial builds directory ---")
+rc, out = sh("ls -la /home/player/.local/share/cordial/builds/ 2>/dev/null || echo 'no builds dir'")
+print(out)
+
+rc, out = sh("find /home/player -name 'libroblox.so' 2>/dev/null | head -5")
+print(f"libroblox.so locations: {out}")
+
+print("\n=== END DEBUG ===")
