@@ -39,162 +39,123 @@ if "--bg" in sys.argv:
     open("/tmp/cap746/status.txt", "w").write(f"attached pid={pid} base={hex(base)}\n")
     os.chmod("/tmp/cap746/status.txt", 0o666)
     
-    # frida script - find 0x90 packet by searching for FFlag string writes
-    # The packet contains "UserPlayerScripts" - when that string is written to a buffer,
-    # scan backwards to find the 90 01 header
+    # frida script - hook 0x90 builder function directly in libroblox
+    # Function at 0x434ba9e builds the 0x90 packet
+    # We hook function entry/exit to capture the output buffer
     frida_script = '''
 var got90 = false;
 var packetCount = 0;
-var searchStr = "UserPlayerScripts";  // unique string in 0x90 packet
 
+// Find libroblox base
+var libroblox = Process.getModuleByName("libroblox.so");
+var base = libroblox.base;
+console.log("[FRIDA] libroblox base: " + base);
+
+// The 0x90 builder function - found via static analysis
+// At 0x434ba9e, writes 0x90 byte at 0x434bc37
+var FUNC_90_OFFSET = 0x434ba9e;
+var func90Addr = base.add(FUNC_90_OFFSET);
+console.log("[FRIDA] 0x90 builder at: " + func90Addr);
+
+// Hook the function
+Interceptor.attach(func90Addr, {
+    onEnter: function(args) {
+        console.log("[0x90 FUNC] Called!");
+        // Save args - typically arg0 or arg1 is output buffer, arg2 might be context
+        this.arg0 = args[0];
+        this.arg1 = args[1];
+        this.arg2 = args[2];
+        console.log("[0x90 FUNC] arg0=" + args[0] + " arg1=" + args[1] + " arg2=" + args[2]);
+    },
+    onLeave: function(ret) {
+        console.log("[0x90 FUNC] Returned: " + ret);
+        
+        // Check arg0 and arg1 for 0x90 packet data
+        var ptrs = [this.arg0, this.arg1, ret];
+        for (var i = 0; i < ptrs.length; i++) {
+            var p = ptrs[i];
+            if (p.isNull()) continue;
+            try {
+                var first4 = p.readByteArray(4);
+                var arr = new Uint8Array(first4);
+                console.log("[0x90 FUNC] ptr" + i + " first4: " + arr[0].toString(16) + " " + arr[1].toString(16) + " " + arr[2].toString(16) + " " + arr[3].toString(16));
+                
+                if (arr[0] == 0x90 && arr[1] == 0x01) {
+                    console.log("[0x90 FUNC] FOUND PACKET at ptr" + i);
+                    // Dump 12KB
+                    var data = p.readByteArray(12000);
+                    var fname = "/tmp/cap746/m90_func_" + (packetCount++) + ".bin";
+                    var f = new File(fname, "wb");
+                    f.write(data);
+                    f.close();
+                    console.log("[0x90] Saved to " + fname);
+                    got90 = true;
+                }
+            } catch(e) {
+                console.log("[0x90 FUNC] ptr" + i + " unreadable");
+            }
+        }
+    }
+});
+
+// Also do a memory scan after connection is established
 var libc = Process.getModuleByName("libc.so.6");
 
-// Hook memcpy - when FFlag strings are copied into packet buffer
-var memcpyAddr = libc.getExportByName("memcpy");
-Interceptor.attach(memcpyAddr, {
+// Hook connect() to know when connection happens
+var connectAddr = libc.getExportByName("connect");
+Interceptor.attach(connectAddr, {
     onEnter: function(args) {
-        if (got90) return;
-        var dst = args[0];
-        var src = args[1];
-        var len = args[2].toInt32();
-        
-        // Check if we're copying the FFlag string
-        if (len >= searchStr.length && len < 100) {
-            try {
-                var data = src.readUtf8String(len);
-                if (data && data.indexOf("UserPlayer") != -1) {
-                    console.log("[memcpy] Found FFlag string copy: " + data);
-                    console.log("[memcpy] dst=" + dst + " len=" + len);
-                    
-                    // Scan backwards from dst to find 90 01 header
-                    for (var offset = 0; offset < 500; offset++) {
-                        try {
-                            var checkPtr = dst.sub(offset);
-                            var b0 = checkPtr.readU8();
-                            var b1 = checkPtr.add(1).readU8();
-                            if (b0 == 0x90 && b1 == 0x01) {
-                                console.log("[FOUND] 90 01 header at offset -" + offset);
-                                // Try to determine packet size - scan forward for end
-                                var packetStart = checkPtr;
-                                var estSize = offset + 12000;  // estimate ~10KB after our position
-                                console.log("[FOUND] Dumping " + estSize + " bytes from " + packetStart);
-                                var fullData = packetStart.readByteArray(estSize);
-                                var fname = "/tmp/cap746/m90_" + (packetCount++) + ".bin";
-                                var f = new File(fname, "wb");
-                                f.write(fullData);
-                                f.close();
-                                console.log("[0x90] Saved to " + fname);
-                                got90 = true;
-                                break;
-                            }
-                        } catch(e) {}
-                    }
-                }
-            } catch(e) {}
-        }
-        
-        // Also check larger copies that might be the whole packet
-        if (!got90 && len > 8000 && len < 15000) {
-            try {
-                var preview = src.readByteArray(Math.min(len, 200));
-                var arr = new Uint8Array(preview);
-                
-                // Check for 90 01 header
-                if (arr[0] == 0x90 && arr[1] == 0x01) {
-                    var str = "";
-                    for (var i = 0; i < arr.length; i++) {
-                        if (arr[i] >= 32 && arr[i] < 127) str += String.fromCharCode(arr[i]);
-                    }
-                    if (str.indexOf("User") != -1) {
-                        console.log("[memcpy] Found full 0x90 packet! len=" + len);
-                        var fullData = src.readByteArray(len);
-                        var fname = "/tmp/cap746/m90_" + (packetCount++) + ".bin";
-                        var f = new File(fname, "wb");
-                        f.write(fullData);
-                        f.close();
-                        got90 = true;
-                    }
-                }
-            } catch(e) {}
-        }
-    }
-});
-
-// Hook strlen - called when measuring FFlag strings before write
-var strlenAddr = libc.getExportByName("strlen");
-var strlenHits = 0;
-Interceptor.attach(strlenAddr, {
-    onEnter: function(args) {
-        if (got90) return;
-        try {
-            var s = args[0].readUtf8String(50);
-            if (s && s.indexOf("UserPlayer") != -1) {
-                strlenHits++;
-                if (strlenHits <= 3) {
-                    console.log("[strlen] FFlag string: " + s);
-                }
-            }
-        } catch(e) {}
-    }
-});
-
-// Periodic memory scan - look for 90 01 followed by FFlag content in heap
-var scanCount = 0;
-function doMemoryScan() {
-    if (got90 || scanCount > 5) return;
-    scanCount++;
-    console.log("[scan] Scanning memory for 0x90 packet...");
-    
-    Process.enumerateRanges('rw-').forEach(function(range) {
-        if (got90) return;
-        if (range.size < 10000 || range.size > 100000000) return;
-        
-        try {
-            Memory.scan(range.base, range.size, "90 01 ?? 00 00 00", {
-                onMatch: function(addr, size) {
+        console.log("[connect] called");
+    },
+    onLeave: function(ret) {
+        if (!got90) {
+            console.log("[connect] returned, scheduling memory scan...");
+            setTimeout(function() {
+                console.log("[scan] Scanning for 0x90 packet in memory...");
+                Process.enumerateRanges('rw-').forEach(function(range) {
                     if (got90) return;
+                    if (range.size < 10000 || range.size > 50000000) return;
+                    
                     try {
-                        // Check if followed by FFlag-like content
-                        var preview = addr.readByteArray(200);
-                        var arr = new Uint8Array(preview);
-                        var str = "";
-                        for (var i = 0; i < arr.length; i++) {
-                            if (arr[i] >= 32 && arr[i] < 127) str += String.fromCharCode(arr[i]);
-                        }
-                        if (str.indexOf("User") != -1 && str.indexOf("Script") != -1) {
-                            console.log("[scan] FOUND 0x90 packet at " + addr);
-                            console.log("[scan] Preview: " + str.substring(0, 100));
-                            // Dump 12KB
-                            var fullData = addr.readByteArray(12000);
-                            var fname = "/tmp/cap746/m90_scan_" + (packetCount++) + ".bin";
-                            var f = new File(fname, "wb");
-                            f.write(fullData);
-                            f.close();
-                            console.log("[0x90] Saved to " + fname);
-                            got90 = true;
-                        }
+                        Memory.scan(range.base, range.size, "90 01 ?? 00 00 00 03", {
+                            onMatch: function(addr, size) {
+                                if (got90) return;
+                                try {
+                                    var preview = addr.readByteArray(100);
+                                    var arr = new Uint8Array(preview);
+                                    var str = "";
+                                    for (var i = 0; i < arr.length; i++) {
+                                        if (arr[i] >= 32 && arr[i] < 127) str += String.fromCharCode(arr[i]);
+                                    }
+                                    if (str.indexOf("User") != -1) {
+                                        console.log("[scan] FOUND at " + addr + ": " + str.substring(0, 50));
+                                        var data = addr.readByteArray(12000);
+                                        var fname = "/tmp/cap746/m90_scan_" + (packetCount++) + ".bin";
+                                        var f = new File(fname, "wb");
+                                        f.write(data);
+                                        f.close();
+                                        console.log("[0x90] Saved to " + fname);
+                                        got90 = true;
+                                    }
+                                } catch(e) {}
+                            },
+                            onComplete: function() {}
+                        });
                     } catch(e) {}
-                },
-                onComplete: function() {}
-            });
-        } catch(e) {}
-    });
-}
-
-// Run memory scan periodically
-setTimeout(doMemoryScan, 3000);
-setTimeout(doMemoryScan, 8000);
-setTimeout(doMemoryScan, 15000);
+                });
+            }, 2000);
+        }
+    }
+});
 
 setInterval(function() {
-    var status = "m90=" + got90 + " count=" + packetCount + " strlenHits=" + strlenHits;
+    var status = "m90=" + got90 + " count=" + packetCount;
     var f = new File("/tmp/cap746/status.txt", "w");
     f.write(status);
     f.close();
 }, 2000);
 
-console.log("[FRIDA] 0x90 capture v2 - hunting FFlag strings");
-console.log("[FRIDA] Will scan memory + hook memcpy/strlen");
+console.log("[FRIDA] Hooked 0x90 builder function + memory scan");
 console.log("[FRIDA] Join a game now!");
 '''
     
