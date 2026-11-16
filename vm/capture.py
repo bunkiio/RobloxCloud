@@ -73,6 +73,8 @@ print(f"", flush=True)
 gdb_script = f'''set pagination off
 set confirm off
 set print thread-events off
+set non-stop on
+set target-async on
 
 python
 import os, time
@@ -83,7 +85,10 @@ got_a7 = False
 chal_preview = ""
 end
 
-printf "\\n[GDB] Breakpoints set. NOW JOIN A GAME!\\n"
+# resume all threads immediately after attach
+continue -a &
+
+printf "\\n[GDB] Breakpoints set, game running. NOW JOIN A GAME!\\n"
 printf "[GDB] Waiting up to 90 seconds for challenge...\\n\\n"
 
 # breakpoint 1: challenge blob decoder
