@@ -48,6 +48,7 @@ if "--bg" in sys.argv:
     frida_script = '''
 const BLOB_OFF = 0x427a7d4;
 const A7_OFF = 0x6152814;
+const DISPATCH_OFF = 0x1fb2d83;  // packet dispatcher - logs all incoming opcodes
 const BASE = ptr("BASE_PLACEHOLDER");
 
 var base = BASE;
@@ -55,10 +56,27 @@ console.log("[FRIDA] Using base: " + base);
 
 var gotChal = false;
 var gotA7 = false;
+var opcodes = {};
 
+// Hook packet dispatcher to see ALL incoming opcodes
+Interceptor.attach(base.add(DISPATCH_OFF), {
+    onEnter: function(args) {
+        try {
+            // after this instruction executes, eax will have the opcode
+            // but onEnter is before, so we need to read it differently
+            // the opcode is already in a register or memory at this point
+        } catch(e) {}
+    },
+    onLeave: function(retval) {
+        // not useful here
+    }
+});
+
+// Actually let's hook a bit earlier where we can read the opcode
 // Hook challenge blob decoder
 Interceptor.attach(base.add(BLOB_OFF), {
     onEnter: function(args) {
+        console.log("[BLOB DECODER CALLED] args[0]=" + args[0] + " args[1]=" + args[1]);
         if (gotChal) return;
         var strPtr = args[1];
         try {
@@ -71,6 +89,7 @@ Interceptor.attach(base.add(BLOB_OFF), {
                 len = flag >> 1;
                 ptr = strPtr.add(1);
             }
+            console.log("[BLOB] flag=" + flag + " len=" + len);
             if (len > 0 && len < 100000) {
                 var blob = ptr.readByteArray(len);
                 var f = new File("/tmp/cap746/challenge.bin", "wb");
@@ -88,6 +107,7 @@ Interceptor.attach(base.add(BLOB_OFF), {
 // Hook A7 builder
 Interceptor.attach(base.add(A7_OFF), {
     onEnter: function(args) {
+        console.log("[A7 BUILDER CALLED]");
         if (gotA7) return;
         var rdi = args[0];
         var rsi = args[1];
