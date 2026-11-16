@@ -126,10 +126,68 @@ setInterval(function() {
     os.system(cmd)
     sys.exit(0)
 
-# --- main entry point: spawn background worker and return immediately ---
+# --- main entry point ---
 
 print("=== ROBLOX 746 CAPTURE ===", flush=True)
 print("", flush=True)
+
+# check if capture already ran - show results
+if os.path.exists("/tmp/cap746/challenge.bin") or os.path.exists("/tmp/cap746/a7_context.bin"):
+    print("=== CAPTURE RESULTS ===", flush=True)
+    rc, out = sh("ls -la /tmp/cap746/")
+    print(out, flush=True)
+    print("", flush=True)
+    
+    if os.path.exists("/tmp/cap746/status.txt"):
+        print("Status:", open("/tmp/cap746/status.txt").read(), flush=True)
+    
+    if os.path.exists("/tmp/cap746/challenge.bin"):
+        sz = os.path.getsize("/tmp/cap746/challenge.bin")
+        with open("/tmp/cap746/challenge.bin", "rb") as f:
+            data = f.read(64)
+        print(f"challenge.bin: {sz} bytes", flush=True)
+        print(f"  hex: {data.hex()}", flush=True)
+    
+    if os.path.exists("/tmp/cap746/a7_context.bin"):
+        sz = os.path.getsize("/tmp/cap746/a7_context.bin")
+        with open("/tmp/cap746/a7_context.bin", "rb") as f:
+            data = f.read(64)
+        print(f"a7_context.bin: {sz} bytes", flush=True)
+        print(f"  hex: {data.hex()}", flush=True)
+    
+    if os.path.exists("/tmp/cap746/frida.log"):
+        print("", flush=True)
+        print("=== FRIDA LOG (last 30 lines) ===", flush=True)
+        log = open("/tmp/cap746/frida.log").read()
+        lines = log.strip().split('\n')
+        print('\n'.join(lines[-30:]), flush=True)
+    
+    sys.exit(0)
+
+# check if capture is running but no results yet
+if os.path.exists("/tmp/cap746/status.txt"):
+    print("Capture already running...", flush=True)
+    print("", flush=True)
+    print("Status:", open("/tmp/cap746/status.txt").read(), flush=True)
+    
+    if os.path.exists("/tmp/cap746/frida.log"):
+        print("", flush=True)
+        print("=== FRIDA LOG ===", flush=True)
+        log = open("/tmp/cap746/frida.log").read()
+        lines = log.strip().split('\n')
+        print('\n'.join(lines[-20:]), flush=True)
+    
+    if os.path.exists("/tmp/cap746/bg.log"):
+        print("", flush=True)
+        print("=== BG LOG ===", flush=True)
+        print(open("/tmp/cap746/bg.log").read()[-500:], flush=True)
+    
+    print("", flush=True)
+    print("No captures yet. Are you in a game?", flush=True)
+    print("To restart capture: rm -rf /tmp/cap746 then run again", flush=True)
+    sys.exit(0)
+
+# --- start new capture ---
 
 # check frida
 rc, out = sh("which frida")
@@ -159,6 +217,4 @@ else:
 print("", flush=True)
 print("NOW JOIN A GAME! The capture is running in background.", flush=True)
 print("", flush=True)
-print("Check progress: cat /tmp/cap746/status.txt", flush=True)
-print("View log: cat /tmp/cap746/frida.log", flush=True)
-print("Results will be in /tmp/cap746/", flush=True)
+print("Run /capture again to check results.", flush=True)
