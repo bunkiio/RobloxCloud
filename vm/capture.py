@@ -63,6 +63,12 @@ sh("rm -rf /tmp/cap746")
 os.makedirs(CAP_DIR, exist_ok=True)
 os.chmod(CAP_DIR, 0o777)
 
+# Pre-create files that frida will write to
+for fname in ["status.txt", "frida.log"]:
+    fpath = f"{CAP_DIR}/{fname}"
+    open(fpath, "w").write("")
+    os.chmod(fpath, 0o666)
+
 # Find process
 rc, out = sh("pgrep -f cordial-run")
 if rc != 0:
@@ -308,8 +314,6 @@ if os.path.exists(f"{CAP_DIR}/frida.log"):
     if "libroblox.so base" in log:
         print("Frida attached!", flush=True)
     print(log[:500], flush=True)
-
-open(f"{CAP_DIR}/status.txt", "w").write(f"started pid={pid}")
 
 print("", flush=True)
 print("NOW JOIN A GAME!", flush=True)
