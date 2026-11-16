@@ -291,6 +291,13 @@ with open(script_path, "w") as f:
     f.write(frida_script)
 
 print("Attaching frida...", flush=True)
+
+# Make sure frida is installed
+rc, _ = sh("which frida")
+if rc != 0:
+    print("Installing frida-tools...", flush=True)
+    sh("pip install frida-tools", timeout=180)
+
 cmd = f"nohup timeout 180 frida -p {pid} -l {script_path} > {CAP_DIR}/frida.log 2>&1 &"
 os.system(cmd)
 
