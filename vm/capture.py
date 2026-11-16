@@ -201,8 +201,14 @@ t = threading.Thread(target=watchdog, daemon=True)
 t.start()
 end
 
-# resume all threads and run in background (non-stop mode)
+# resume all threads
 continue -a &
+
+# keep gdb alive for 90 seconds (shell command blocks)
+shell sleep 90
+
+# if we get here, timeout
+detach
 '''
 
 open("/tmp/capture.gdb", "w").write(gdb_script)
