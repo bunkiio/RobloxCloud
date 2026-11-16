@@ -54,9 +54,18 @@ console.log("[FRIDA] Using base: " + base);
 var gotA7 = false;
 var a7Count = 0;
 
+// Find libc
+var libc = Process.getModuleByName("libc.so.6");
+console.log("[FRIDA] libc: " + libc.base);
+
+var writeAddr = libc.getExportByName("write");
+var sendtoAddr = libc.getExportByName("sendto");
+
+console.log("[FRIDA] write @ " + writeAddr);
+console.log("[FRIDA] sendto @ " + sendtoAddr);
+
 // Hook the write syscall to capture outgoing data
-// Any packet starting with 0xa7 is the A7 attestation
-Interceptor.attach(Module.getExportByName(null, "write"), {
+Interceptor.attach(writeAddr, {
     onEnter: function(args) {
         var fd = args[0].toInt32();
         var buf = args[1];
@@ -69,14 +78,11 @@ Interceptor.attach(Module.getExportByName(null, "write"), {
                 var arr = new Uint8Array(data);
                 
                 // Look for A7 opcode anywhere in the first 32 bytes
-                // (might be wrapped in framing)
                 for (var i = 0; i < Math.min(32, arr.length - 2); i++) {
                     if (arr[i] == 0xa7 && arr[i+1] > 0 && arr[i+1] < 50) {
-                        // Potential A7 packet: opcode 0xa7 followed by count
                         var count = arr[i+1];
-                        console.log("[WRITE] Found potential A7 at offset " + i + ", count=" + count + ", fd=" + fd + ", len=" + len);
+                        console.log("[WRITE] Found A7 at offset " + i + ", count=" + count + ", fd=" + fd + ", len=" + len);
                         
-                        // Save the whole buffer for analysis
                         var fullData = buf.readByteArray(len);
                         var filename = "/tmp/cap746/write_a7_" + (a7Count++) + ".bin";
                         var f = new File(filename, "wb");
@@ -84,10 +90,7 @@ Interceptor.attach(Module.getExportByName(null, "write"), {
                         f.close();
                         console.log("[A7] Saved " + len + " bytes to " + filename);
                         
-                        // Also save just the A7 portion
-                        if (i + 2 + count * 16 <= len) {
-                            // Estimate A7 size (opcode + count + hashes)
-                            // Each hash entry might be variable, save generous amount
+                        if (i + 2 <= len) {
                             var a7Len = Math.min(len - i, 512);
                             var a7Data = buf.add(i).readByteArray(a7Len);
                             var f2 = new File("/tmp/cap746/a7_packet.bin", "wb");
@@ -99,15 +102,13 @@ Interceptor.attach(Module.getExportByName(null, "write"), {
                         break;
                     }
                 }
-            } catch(e) {
-                // ignore read errors
-            }
+            } catch(e) {}
         }
     }
 });
 
-// Also hook sendto and sendmsg for UDP
-Interceptor.attach(Module.getExportByName(null, "sendto"), {
+// Also hook sendto for UDP/QUIC
+Interceptor.attach(sendtoAddr, {
     onEnter: function(args) {
         var fd = args[0].toInt32();
         var buf = args[1];
@@ -120,7 +121,7 @@ Interceptor.attach(Module.getExportByName(null, "sendto"), {
                 
                 for (var i = 0; i < Math.min(32, arr.length - 2); i++) {
                     if (arr[i] == 0xa7 && arr[i+1] > 0 && arr[i+1] < 50) {
-                        console.log("[SENDTO] Found A7 at offset " + i + ", count=" + arr[i+1] + ", fd=" + fd);
+                        console.log("[SENDTO] Found A7 at offset " + i + ", count=" + arr[i+1] + ", fd=" + fd + ", len=" + len);
                         var fullData = buf.readByteArray(len);
                         var f = new File("/tmp/cap746/sendto_a7.bin", "wb");
                         f.write(fullData);
