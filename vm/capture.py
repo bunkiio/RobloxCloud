@@ -43,104 +43,105 @@ if "--bg" in sys.argv:
     open("/tmp/cap746/status.txt", "w").write(f"attached pid={pid} base={hex(base)}\n")
     os.chmod("/tmp/cap746/status.txt", 0o666)
     
-    # frida script - pass base address directly since module lookup fails
-    # use .format() to avoid f-string escaping hell
+    # frida script - capture outgoing packets to find A7
+    # Hook write/send syscalls and look for 0xa7 opcode
     frida_script = '''
-const BLOB_OFF = 0x427a7d4;
-const A7_OFF = 0x6152814;
-const DISPATCH_OFF = 0x1fb2d83;  // packet dispatcher - logs all incoming opcodes
 const BASE = ptr("BASE_PLACEHOLDER");
 
 var base = BASE;
 console.log("[FRIDA] Using base: " + base);
 
-var gotChal = false;
 var gotA7 = false;
-var opcodes = {};
+var a7Count = 0;
 
-// Hook packet dispatcher to see ALL incoming opcodes
-Interceptor.attach(base.add(DISPATCH_OFF), {
+// Hook the write syscall to capture outgoing data
+// Any packet starting with 0xa7 is the A7 attestation
+Interceptor.attach(Module.getExportByName(null, "write"), {
     onEnter: function(args) {
-        try {
-            // after this instruction executes, eax will have the opcode
-            // but onEnter is before, so we need to read it differently
-            // the opcode is already in a register or memory at this point
-        } catch(e) {}
-    },
-    onLeave: function(retval) {
-        // not useful here
-    }
-});
-
-// Actually let's hook a bit earlier where we can read the opcode
-// Hook challenge blob decoder
-Interceptor.attach(base.add(BLOB_OFF), {
-    onEnter: function(args) {
-        console.log("[BLOB DECODER CALLED] args[0]=" + args[0] + " args[1]=" + args[1]);
-        if (gotChal) return;
-        var strPtr = args[1];
-        try {
-            var flag = strPtr.readU8();
-            var ptr, len;
-            if (flag & 1) {
-                len = strPtr.add(8).readU64().toNumber();
-                ptr = strPtr.add(16).readPointer();
-            } else {
-                len = flag >> 1;
-                ptr = strPtr.add(1);
+        var fd = args[0].toInt32();
+        var buf = args[1];
+        var len = args[2].toInt32();
+        
+        // Only check reasonable sized buffers on likely socket fds
+        if (len > 10 && len < 10000 && fd > 2) {
+            try {
+                var data = buf.readByteArray(Math.min(len, 256));
+                var arr = new Uint8Array(data);
+                
+                // Look for A7 opcode anywhere in the first 32 bytes
+                // (might be wrapped in framing)
+                for (var i = 0; i < Math.min(32, arr.length - 2); i++) {
+                    if (arr[i] == 0xa7 && arr[i+1] > 0 && arr[i+1] < 50) {
+                        // Potential A7 packet: opcode 0xa7 followed by count
+                        var count = arr[i+1];
+                        console.log("[WRITE] Found potential A7 at offset " + i + ", count=" + count + ", fd=" + fd + ", len=" + len);
+                        
+                        // Save the whole buffer for analysis
+                        var fullData = buf.readByteArray(len);
+                        var filename = "/tmp/cap746/write_a7_" + (a7Count++) + ".bin";
+                        var f = new File(filename, "wb");
+                        f.write(fullData);
+                        f.close();
+                        console.log("[A7] Saved " + len + " bytes to " + filename);
+                        
+                        // Also save just the A7 portion
+                        if (i + 2 + count * 16 <= len) {
+                            // Estimate A7 size (opcode + count + hashes)
+                            // Each hash entry might be variable, save generous amount
+                            var a7Len = Math.min(len - i, 512);
+                            var a7Data = buf.add(i).readByteArray(a7Len);
+                            var f2 = new File("/tmp/cap746/a7_packet.bin", "wb");
+                            f2.write(a7Data);
+                            f2.close();
+                            console.log("[A7] Extracted A7 packet, " + a7Len + " bytes");
+                            gotA7 = true;
+                        }
+                        break;
+                    }
+                }
+            } catch(e) {
+                // ignore read errors
             }
-            console.log("[BLOB] flag=" + flag + " len=" + len);
-            if (len > 0 && len < 100000) {
-                var blob = ptr.readByteArray(len);
-                var f = new File("/tmp/cap746/challenge.bin", "wb");
-                f.write(blob);
-                f.close();
-                console.log("[CHAL] " + len + " bytes");
-                gotChal = true;
-            }
-        } catch (e) {
-            console.log("[CHAL ERR] " + e);
         }
     }
 });
 
-// Hook A7 builder
-Interceptor.attach(base.add(A7_OFF), {
+// Also hook sendto and sendmsg for UDP
+Interceptor.attach(Module.getExportByName(null, "sendto"), {
     onEnter: function(args) {
-        console.log("[A7 BUILDER CALLED]");
-        if (gotA7) return;
-        var rdi = args[0];
-        var rsi = args[1];
-        try {
-            if (rdi.toInt32() > 0x1000) {
-                var ctx = rdi.readByteArray(2048);
-                var f = new File("/tmp/cap746/a7_context.bin", "wb");
-                f.write(ctx);
-                f.close();
-            }
-            if (rsi.toInt32() > 0x1000) {
-                var rsiData = rsi.readByteArray(512);
-                var f2 = new File("/tmp/cap746/a7_rsi.bin", "wb");
-                f2.write(rsiData);
-                f2.close();
-            }
-            console.log("[A7] captured");
-            gotA7 = true;
-        } catch (e) {
-            console.log("[A7 ERR] " + e);
+        var fd = args[0].toInt32();
+        var buf = args[1];
+        var len = args[2].toInt32();
+        
+        if (len > 10 && len < 10000) {
+            try {
+                var data = buf.readByteArray(Math.min(len, 256));
+                var arr = new Uint8Array(data);
+                
+                for (var i = 0; i < Math.min(32, arr.length - 2); i++) {
+                    if (arr[i] == 0xa7 && arr[i+1] > 0 && arr[i+1] < 50) {
+                        console.log("[SENDTO] Found A7 at offset " + i + ", count=" + arr[i+1] + ", fd=" + fd);
+                        var fullData = buf.readByteArray(len);
+                        var f = new File("/tmp/cap746/sendto_a7.bin", "wb");
+                        f.write(fullData);
+                        f.close();
+                        gotA7 = true;
+                        break;
+                    }
+                }
+            } catch(e) {}
         }
     }
 });
 
 setInterval(function() {
-    var status = "chal=" + gotChal + " a7=" + gotA7;
+    var status = "a7=" + gotA7;
     var f = new File("/tmp/cap746/status.txt", "w");
     f.write(status);
     f.close();
-    if (gotChal && gotA7) {
-        console.log("[DONE]");
-    }
 }, 2000);
+
+console.log("[FRIDA] Hooks installed. Join a game to capture A7 packet.");
 '''.replace("BASE_PLACEHOLDER", hex(base))
     
     open("/tmp/frida_capture.js", "w").write(frida_script)
@@ -156,7 +157,7 @@ print("=== ROBLOX 746 CAPTURE ===", flush=True)
 print("", flush=True)
 
 # check if capture already ran - show results
-if os.path.exists("/tmp/cap746/challenge.bin") or os.path.exists("/tmp/cap746/a7_context.bin"):
+if os.path.exists("/tmp/cap746/a7_packet.bin") or os.path.exists("/tmp/cap746/sendto_a7.bin"):
     print("=== CAPTURE RESULTS ===", flush=True)
     rc, out = sh("ls -la /tmp/cap746/")
     print(out, flush=True)
@@ -165,19 +166,18 @@ if os.path.exists("/tmp/cap746/challenge.bin") or os.path.exists("/tmp/cap746/a7
     if os.path.exists("/tmp/cap746/status.txt"):
         print("Status:", open("/tmp/cap746/status.txt").read(), flush=True)
     
-    if os.path.exists("/tmp/cap746/challenge.bin"):
-        sz = os.path.getsize("/tmp/cap746/challenge.bin")
-        with open("/tmp/cap746/challenge.bin", "rb") as f:
-            data = f.read(64)
-        print(f"challenge.bin: {sz} bytes", flush=True)
-        print(f"  hex: {data.hex()}", flush=True)
-    
-    if os.path.exists("/tmp/cap746/a7_context.bin"):
-        sz = os.path.getsize("/tmp/cap746/a7_context.bin")
-        with open("/tmp/cap746/a7_context.bin", "rb") as f:
-            data = f.read(64)
-        print(f"a7_context.bin: {sz} bytes", flush=True)
-        print(f"  hex: {data.hex()}", flush=True)
+    for fname in ["a7_packet.bin", "sendto_a7.bin", "write_a7_0.bin"]:
+        fpath = f"/tmp/cap746/{fname}"
+        if os.path.exists(fpath):
+            sz = os.path.getsize(fpath)
+            with open(fpath, "rb") as f:
+                data = f.read(128)
+            print(f"{fname}: {sz} bytes", flush=True)
+            print(f"  hex: {data.hex()}", flush=True)
+            # Parse A7 structure if it starts with a7
+            if data[0] == 0xa7:
+                count = data[1]
+                print(f"  A7 opcode confirmed, count={count}", flush=True)
     
     if os.path.exists("/tmp/cap746/frida.log"):
         print("", flush=True)
