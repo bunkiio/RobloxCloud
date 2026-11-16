@@ -43,16 +43,15 @@ if "--bg" in sys.argv:
     open("/tmp/cap746/status.txt", "w").write(f"attached pid={pid} base={hex(base)}\n")
     os.chmod("/tmp/cap746/status.txt", 0o666)
     
-    # frida script - capture outgoing packets to find A7
-    # Hook write/send syscalls and look for 0xa7 opcode
+    # frida script - capture 0x90 packet only
     frida_script = '''
 const BASE = ptr("BASE_PLACEHOLDER");
 
 var base = BASE;
 console.log("[FRIDA] Using base: " + base);
 
-var gotA7 = false;
-var a7Count = 0;
+var got90 = false;
+var m90Count = 0;
 
 // Find libc
 var libc = Process.getModuleByName("libc.so.6");
@@ -64,42 +63,48 @@ var sendtoAddr = libc.getExportByName("sendto");
 console.log("[FRIDA] write @ " + writeAddr);
 console.log("[FRIDA] sendto @ " + sendtoAddr);
 
-// Hook the write syscall to capture outgoing data
+// Hook write to find 0x90 packet
 Interceptor.attach(writeAddr, {
     onEnter: function(args) {
         var fd = args[0].toInt32();
         var buf = args[1];
         var len = args[2].toInt32();
         
-        // Only check reasonable sized buffers on likely socket fds
-        if (len > 10 && len < 10000 && fd > 2) {
+        if (len > 100 && len < 50000 && fd > 2) {
             try {
-                var data = buf.readByteArray(Math.min(len, 256));
+                var data = buf.readByteArray(Math.min(len, 1024));
                 var arr = new Uint8Array(data);
                 
-                // Look for A7 opcode anywhere in the first 32 bytes
-                for (var i = 0; i < Math.min(32, arr.length - 2); i++) {
-                    if (arr[i] == 0xa7 && arr[i+1] > 0 && arr[i+1] < 50) {
-                        var count = arr[i+1];
-                        console.log("[WRITE] Found A7 at offset " + i + ", count=" + count + ", fd=" + fd + ", len=" + len);
-                        
-                        var fullData = buf.readByteArray(len);
-                        var filename = "/tmp/cap746/write_a7_" + (a7Count++) + ".bin";
-                        var f = new File(filename, "wb");
-                        f.write(fullData);
-                        f.close();
-                        console.log("[A7] Saved " + len + " bytes to " + filename);
-                        
-                        if (i + 2 <= len) {
-                            var a7Len = Math.min(len - i, 512);
-                            var a7Data = buf.add(i).readByteArray(a7Len);
-                            var f2 = new File("/tmp/cap746/a7_packet.bin", "wb");
-                            f2.write(a7Data);
-                            f2.close();
-                            console.log("[A7] Extracted A7 packet, " + a7Len + " bytes");
-                            gotA7 = true;
+                // Look for 0x90 opcode followed by JSON with UserId
+                for (var i = 0; i < Math.min(100, arr.length - 20); i++) {
+                    if (arr[i] == 0x90) {
+                        // Check if this looks like the 0x90 packet (has JSON nearby)
+                        var snippet = "";
+                        for (var j = i; j < Math.min(i + 200, arr.length); j++) {
+                            if (arr[j] >= 32 && arr[j] < 127) {
+                                snippet += String.fromCharCode(arr[j]);
+                            }
                         }
-                        break;
+                        if (snippet.indexOf("UserId") != -1 || snippet.indexOf("RandomSeed") != -1) {
+                            console.log("[WRITE] Found 0x90 at offset " + i + ", fd=" + fd + ", len=" + len);
+                            console.log("[WRITE] snippet: " + snippet.substring(0, 100));
+                            
+                            var fullData = buf.readByteArray(len);
+                            var filename = "/tmp/cap746/write_90_" + (m90Count++) + ".bin";
+                            var f = new File(filename, "wb");
+                            f.write(fullData);
+                            f.close();
+                            
+                            // Extract just the 0x90 portion
+                            var m90Len = len - i;
+                            var m90Data = buf.add(i).readByteArray(m90Len);
+                            var f2 = new File("/tmp/cap746/m90_packet.bin", "wb");
+                            f2.write(m90Data);
+                            f2.close();
+                            console.log("[0x90] Extracted " + m90Len + " bytes");
+                            got90 = true;
+                            break;
+                        }
                     }
                 }
             } catch(e) {}
@@ -107,27 +112,35 @@ Interceptor.attach(writeAddr, {
     }
 });
 
-// Also hook sendto for UDP/QUIC
+// Also hook sendto
 Interceptor.attach(sendtoAddr, {
     onEnter: function(args) {
         var fd = args[0].toInt32();
         var buf = args[1];
         var len = args[2].toInt32();
         
-        if (len > 10 && len < 10000) {
+        if (len > 100 && len < 50000) {
             try {
-                var data = buf.readByteArray(Math.min(len, 256));
+                var data = buf.readByteArray(Math.min(len, 1024));
                 var arr = new Uint8Array(data);
                 
-                for (var i = 0; i < Math.min(32, arr.length - 2); i++) {
-                    if (arr[i] == 0xa7 && arr[i+1] > 0 && arr[i+1] < 50) {
-                        console.log("[SENDTO] Found A7 at offset " + i + ", count=" + arr[i+1] + ", fd=" + fd + ", len=" + len);
-                        var fullData = buf.readByteArray(len);
-                        var f = new File("/tmp/cap746/sendto_a7.bin", "wb");
-                        f.write(fullData);
-                        f.close();
-                        gotA7 = true;
-                        break;
+                for (var i = 0; i < Math.min(100, arr.length - 20); i++) {
+                    if (arr[i] == 0x90) {
+                        var snippet = "";
+                        for (var j = i; j < Math.min(i + 200, arr.length); j++) {
+                            if (arr[j] >= 32 && arr[j] < 127) {
+                                snippet += String.fromCharCode(arr[j]);
+                            }
+                        }
+                        if (snippet.indexOf("UserId") != -1 || snippet.indexOf("RandomSeed") != -1) {
+                            console.log("[SENDTO] Found 0x90 at offset " + i + ", fd=" + fd + ", len=" + len);
+                            var fullData = buf.readByteArray(len);
+                            var f = new File("/tmp/cap746/sendto_90.bin", "wb");
+                            f.write(fullData);
+                            f.close();
+                            got90 = true;
+                            break;
+                        }
                     }
                 }
             } catch(e) {}
@@ -136,13 +149,13 @@ Interceptor.attach(sendtoAddr, {
 });
 
 setInterval(function() {
-    var status = "a7=" + gotA7;
+    var status = "m90=" + got90;
     var f = new File("/tmp/cap746/status.txt", "w");
     f.write(status);
     f.close();
 }, 2000);
 
-console.log("[FRIDA] Hooks installed. Join a game to capture A7 packet.");
+console.log("[FRIDA] Hooks installed. Join a game to capture 0x90 packet.");
 '''.replace("BASE_PLACEHOLDER", hex(base))
     
     open("/tmp/frida_capture.js", "w").write(frida_script)
@@ -158,7 +171,7 @@ print("=== ROBLOX 746 CAPTURE ===", flush=True)
 print("", flush=True)
 
 # check if capture already ran - show results
-if os.path.exists("/tmp/cap746/a7_packet.bin") or os.path.exists("/tmp/cap746/sendto_a7.bin"):
+if os.path.exists("/tmp/cap746/m90_packet.bin") or os.path.exists("/tmp/cap746/sendto_90.bin") or os.path.exists("/tmp/cap746/write_90_0.bin"):
     print("=== CAPTURE RESULTS ===", flush=True)
     rc, out = sh("ls -la /tmp/cap746/")
     print(out, flush=True)
@@ -167,26 +180,24 @@ if os.path.exists("/tmp/cap746/a7_packet.bin") or os.path.exists("/tmp/cap746/se
     if os.path.exists("/tmp/cap746/status.txt"):
         print("Status:", open("/tmp/cap746/status.txt").read(), flush=True)
     
-    for fname in ["a7_packet.bin", "sendto_a7.bin", "write_a7_0.bin"]:
+    for fname in ["m90_packet.bin", "sendto_90.bin", "write_90_0.bin"]:
         fpath = f"/tmp/cap746/{fname}"
         if os.path.exists(fpath):
             sz = os.path.getsize(fpath)
             with open(fpath, "rb") as f:
                 data = f.read()
             print(f"{fname}: {sz} bytes", flush=True)
-            # Print full hex for a7_packet.bin, first 128 for others
-            if fname == "a7_packet.bin":
+            if fname == "m90_packet.bin":
                 print(f"  FULL HEX:", flush=True)
-                # Print in rows of 32 bytes
-                for i in range(0, len(data), 32):
+                for i in range(0, min(len(data), 2048), 32):
                     row = data[i:i+32]
                     print(f"  {i:04x}: {row.hex()}", flush=True)
+                if len(data) > 2048:
+                    print(f"  ... ({len(data) - 2048} more bytes)", flush=True)
             else:
                 print(f"  hex: {data[:128].hex()}", flush=True)
-            # Parse A7 structure if it starts with a7
-            if data[0] == 0xa7:
-                count = data[1]
-                print(f"  A7 opcode confirmed, count={count}", flush=True)
+            if len(data) > 0 and data[0] == 0x90:
+                print(f"  0x90 opcode confirmed", flush=True)
     
     if os.path.exists("/tmp/cap746/frida.log"):
         print("", flush=True)
