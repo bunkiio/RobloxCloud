@@ -99,20 +99,40 @@ frida_script = '''
 var got90 = false;
 var counter = 0;
 
-// Find libroblox module - might be loaded with full path
-var base = null;
-Process.enumerateModules().forEach(function(m) {
-    if (m.name.indexOf("libroblox") != -1 || m.path.indexOf("libroblox") != -1) {
-        base = m.base;
-        console.log("[*] Found: " + m.name + " at " + m.base);
+// Find libroblox by reading /proc/self/maps
+var maps = null;
+try {
+    var f = new File("/proc/self/maps", "r");
+    maps = f.readLine();
+    var lines = "";
+    while (maps !== "") {
+        lines += maps;
+        maps = f.readLine();
     }
-});
-if (!base) {
-    console.log("[*] libroblox not found, listing modules:");
-    Process.enumerateModules().slice(0, 20).forEach(function(m) {
-        console.log("    " + m.name + " @ " + m.base);
+    f.close();
+    
+    // Find libroblox line
+    var librobloxBase = null;
+    lines.split("\\n").forEach(function(line) {
+        if (line.indexOf("libroblox") != -1 && librobloxBase === null) {
+            var addr = line.split("-")[0];
+            librobloxBase = ptr("0x" + addr);
+            console.log("[*] Found libroblox in maps: " + line.substring(0, 80));
+        }
     });
+    
+    if (librobloxBase) {
+        console.log("[*] libroblox base: " + librobloxBase);
+    }
+} catch(e) {
+    console.log("[*] Could not read maps: " + e);
 }
+
+// List all modules anyway
+console.log("[*] Loaded modules:");
+Process.enumerateModules().slice(0, 10).forEach(function(m) {
+    console.log("    " + m.name + " @ " + m.base + " size=" + m.size);
+});
 
 // The 0x90 packet is built and then passed to the QUIC layer.
 // We need to intercept it at the serialization point.
@@ -181,11 +201,11 @@ function scanForPacket() {
         if (range.size < 10000 || range.size > 100000000) return;
         
         try {
-            // Search for: 90 01 followed by typical length byte and FFlag prefix
-            // Pattern: 90 01 XX 00 00 00 (where XX is likely 20-30)
-            Memory.scan(range.base, range.size, "90 01 ?? 00 00 00 03", {
+            // Search for: 90 01 (the 0x90 packet header)
+            // More lenient pattern - just 90 01 followed by any bytes
+            Memory.scan(range.base, range.size, "90 01", {
                 onMatch: function(addr, size) {
-                    if (got90 || found > 3) return;
+                    if (got90 || found > 10) return;
                     try {
                         // Read ahead and check for FFlag strings
                         var preview = addr.readByteArray(500);
@@ -195,20 +215,13 @@ function scanForPacket() {
                             if (arr[i] >= 32 && arr[i] < 127) str += String.fromCharCode(arr[i]);
                         }
                         
-                        if (str.indexOf("User") != -1 && str.indexOf("Script") != -1) {
+                        // Check for FFlag indicators
+                        if ((str.indexOf("User") != -1 && str.indexOf("Script") != -1) ||
+                            (str.indexOf("UserId") != -1) ||
+                            (str.indexOf("Integration") != -1)) {
                             console.log("[scan] FOUND 0x90 at " + addr);
-                            console.log("[scan] Preview: " + str.substring(0, 80));
+                            console.log("[scan] Preview: " + str.substring(0, 100));
                             found++;
-                            
-                            // Find packet end - scan for trailer pattern
-                            // The packet ends with 5x u32 (20 bytes trailer)
-                            var pktSize = 11000; // estimate
-                            for (var sz = 9000; sz < 13000; sz += 100) {
-                                try {
-                                    var test = addr.add(sz).readByteArray(4);
-                                    // Just dump 12KB and we'll trim later
-                                } catch(e) { pktSize = sz - 100; break; }
-                            }
                             
                             var data = addr.readByteArray(12000);
                             var fname = "/tmp/cap746/m90_scan_" + counter + ".bin";
