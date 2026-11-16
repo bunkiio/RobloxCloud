@@ -37,7 +37,11 @@ if "--bg" in sys.argv:
         open("/tmp/cap746/error.txt", "w").write("no libroblox process found")
         sys.exit(1)
     
+    # make sure directory is writable by anyone (frida runs in target process context)
+    os.chmod("/tmp/cap746", 0o777)
+    
     open("/tmp/cap746/status.txt", "w").write(f"attached pid={pid} base={hex(base)}\n")
+    os.chmod("/tmp/cap746/status.txt", 0o666)
     
     # frida script - pass base address directly since module lookup fails
     # use .format() to avoid f-string escaping hell
@@ -198,6 +202,7 @@ if rc != 0:
 # clean up old capture
 sh("rm -rf /tmp/cap746")
 os.makedirs("/tmp/cap746", exist_ok=True)
+os.chmod("/tmp/cap746", 0o777)  # world writable so frida can write
 
 # spawn ourselves in background with --bg flag
 script_path = os.path.abspath(__file__)
