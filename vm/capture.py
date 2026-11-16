@@ -49,15 +49,17 @@ var memcpyAddr = libc.getExportByName("memcpy");
 var memmoveAddr = libc.getExportByName("memmove");
 
 function checkFor90Packet(funcName, src, len) {
+    // 0x90 packets are 8-15KB, start with 90 01, and contain FFlag strings
     if (len < 5000 || len > 20000) return;
     
     try {
         var first4 = src.readByteArray(4);
         var arr = new Uint8Array(first4);
         
-        if (arr[0] == 0x90) {
-            console.log("[" + funcName + "] Found 0x90 header! len=" + len);
-            console.log("[" + funcName + "] First 32 bytes: " + hexdump(src, {length: 32, header: false}));
+        // Must start with 90 01 (not just 90)
+        if (arr[0] == 0x90 && arr[1] == 0x01) {
+            console.log("[" + funcName + "] Found 0x90 0x01 header! len=" + len);
+            console.log("[" + funcName + "] First 64 bytes: " + hexdump(src, {length: 64, header: false}));
             
             var preview = src.readByteArray(Math.min(len, 500));
             var previewArr = new Uint8Array(preview);
@@ -68,9 +70,11 @@ function checkFor90Packet(funcName, src, len) {
                 }
             }
             
-            if (str.indexOf("User") != -1 || str.indexOf("Enable") != -1 || str.indexOf("Phase") != -1) {
+            console.log("[" + funcName + "] ASCII: " + str.substring(0, 150));
+            
+            // Look for FFlag indicators
+            if (str.indexOf("User") != -1 || str.indexOf("Enable") != -1 || str.indexOf("Integration") != -1 || str.indexOf("Script") != -1) {
                 console.log("[0x90 PACKET FOUND] len=" + len);
-                console.log("[0x90] Preview: " + str.substring(0, 200));
                 
                 var fullData = src.readByteArray(len);
                 var fname = "/tmp/cap746/m90_" + (packetCount++) + ".bin";
@@ -82,14 +86,16 @@ function checkFor90Packet(funcName, src, len) {
             }
         }
         
-        if (!got90 && len > 100) {
-            var chunk = src.readByteArray(Math.min(len, 1000));
+        // Also scan for embedded 90 01 pattern
+        if (!got90) {
+            var chunk = src.readByteArray(Math.min(len, 2000));
             var chunkArr = new Uint8Array(chunk);
             
-            for (var i = 0; i < chunkArr.length - 10; i++) {
+            for (var i = 0; i < chunkArr.length - 20; i++) {
+                // Look for 90 01 followed by reasonable bytes
                 if (chunkArr[i] == 0x90 && chunkArr[i+1] == 0x01) {
                     var remaining = len - i;
-                    if (remaining > 5000 && remaining < 15000) {
+                    if (remaining > 8000 && remaining < 15000) {
                         var sub = src.add(i).readByteArray(Math.min(remaining, 500));
                         var subArr = new Uint8Array(sub);
                         var subStr = "";
@@ -99,14 +105,15 @@ function checkFor90Packet(funcName, src, len) {
                             }
                         }
                         
-                        if (subStr.indexOf("User") != -1) {
+                        if (subStr.indexOf("User") != -1 || subStr.indexOf("Script") != -1) {
                             console.log("[0x90 EMBEDDED] Found at offset " + i + " remaining=" + remaining);
+                            console.log("[0x90 EMBEDDED] ASCII: " + subStr.substring(0, 100));
                             var fullData = src.add(i).readByteArray(remaining);
                             var fname = "/tmp/cap746/m90_embedded_" + (packetCount++) + ".bin";
                             var f = new File(fname, "wb");
                             f.write(fullData);
                             f.close();
-                            console.log("[0x90] Saved embedded packet to " + fname);
+                            console.log("[0x90] Saved embedded to " + fname);
                             got90 = true;
                             break;
                         }
