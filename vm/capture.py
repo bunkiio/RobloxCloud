@@ -207,11 +207,18 @@ continue -a &
 
 open("/tmp/capture.gdb", "w").write(gdb_script)
 
+# write a separate init file that runs FIRST to set non-stop mode
+init_script = '''set non-stop on
+set pagination off
+set confirm off
+'''
+open("/tmp/gdb_init", "w").write(init_script)
+
 print("Attaching gdb...", flush=True)
 print("=" * 50, flush=True)
 
-# run gdb with non-stop mode set BEFORE attaching
-cmd = f"timeout 100 gdb -batch -n -ex 'set non-stop on' -ex 'set pagination off' -p {pid} -x /tmp/capture.gdb 2>&1"
+# use -ix to run init BEFORE anything, including attach
+cmd = f"timeout 100 gdb -batch -n -ix /tmp/gdb_init -p {pid} -x /tmp/capture.gdb 2>&1"
 proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
 try:
