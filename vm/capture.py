@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-Capture challenge blob from 746 Roblox client using Frida.
-Runs in background so it doesn't block the streamer.
-
-RUN THIS BEFORE JOINING A GAME.
+Capture 0x90 packet from 746 Roblox client using Frida.
+Hooks memcpy/memmove to catch packet before QUIC encryption.
 """
 import subprocess
 import os
 import time
 import sys
+import glob
 
 def sh(cmd, timeout=120):
     r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
@@ -16,7 +15,6 @@ def sh(cmd, timeout=120):
 
 # if called with --bg, we're the background worker
 if "--bg" in sys.argv:
-    # this is the actual capture logic
     os.makedirs("/tmp/cap746", exist_ok=True)
     
     # find cordial-run with libroblox
@@ -37,111 +35,114 @@ if "--bg" in sys.argv:
         open("/tmp/cap746/error.txt", "w").write("no libroblox process found")
         sys.exit(1)
     
-    # make sure directory is writable by anyone (frida runs in target process context)
     os.chmod("/tmp/cap746", 0o777)
-    
     open("/tmp/cap746/status.txt", "w").write(f"attached pid={pid} base={hex(base)}\n")
     os.chmod("/tmp/cap746/status.txt", 0o666)
     
-    # frida script - capture 0x90 packet only
+    # frida script - scan for 0x90 packet by signature
     frida_script = '''
-const BASE = ptr("BASE_PLACEHOLDER");
-
-var base = BASE;
-console.log("[FRIDA] Using base: " + base);
-
 var got90 = false;
-var m90Count = 0;
+var packetCount = 0;
 
-// Find libc
 var libc = Process.getModuleByName("libc.so.6");
-console.log("[FRIDA] libc: " + libc.base);
+var memcpyAddr = libc.getExportByName("memcpy");
+var memmoveAddr = libc.getExportByName("memmove");
 
-var writeAddr = libc.getExportByName("write");
-var sendtoAddr = libc.getExportByName("sendto");
-
-console.log("[FRIDA] write @ " + writeAddr);
-console.log("[FRIDA] sendto @ " + sendtoAddr);
-
-// Hook write to find 0x90 packet
-Interceptor.attach(writeAddr, {
-    onEnter: function(args) {
-        var fd = args[0].toInt32();
-        var buf = args[1];
-        var len = args[2].toInt32();
+function checkFor90Packet(funcName, src, len) {
+    if (len < 5000 || len > 20000) return;
+    
+    try {
+        var first4 = src.readByteArray(4);
+        var arr = new Uint8Array(first4);
         
-        if (len > 100 && len < 50000 && fd > 2) {
-            try {
-                var data = buf.readByteArray(Math.min(len, 1024));
-                var arr = new Uint8Array(data);
+        if (arr[0] == 0x90) {
+            console.log("[" + funcName + "] Found 0x90 header! len=" + len);
+            console.log("[" + funcName + "] First 32 bytes: " + hexdump(src, {length: 32, header: false}));
+            
+            var preview = src.readByteArray(Math.min(len, 500));
+            var previewArr = new Uint8Array(preview);
+            var str = "";
+            for (var i = 0; i < previewArr.length; i++) {
+                if (previewArr[i] >= 32 && previewArr[i] < 127) {
+                    str += String.fromCharCode(previewArr[i]);
+                }
+            }
+            
+            if (str.indexOf("User") != -1 || str.indexOf("Enable") != -1 || str.indexOf("Phase") != -1) {
+                console.log("[0x90 PACKET FOUND] len=" + len);
+                console.log("[0x90] Preview: " + str.substring(0, 200));
                 
-                // Look for 0x90 opcode followed by JSON with UserId
-                for (var i = 0; i < Math.min(100, arr.length - 20); i++) {
-                    if (arr[i] == 0x90) {
-                        // Check if this looks like the 0x90 packet (has JSON nearby)
-                        var snippet = "";
-                        for (var j = i; j < Math.min(i + 200, arr.length); j++) {
-                            if (arr[j] >= 32 && arr[j] < 127) {
-                                snippet += String.fromCharCode(arr[j]);
+                var fullData = src.readByteArray(len);
+                var fname = "/tmp/cap746/m90_" + (packetCount++) + ".bin";
+                var f = new File(fname, "wb");
+                f.write(fullData);
+                f.close();
+                console.log("[0x90] Saved to " + fname);
+                got90 = true;
+            }
+        }
+        
+        if (!got90 && len > 100) {
+            var chunk = src.readByteArray(Math.min(len, 1000));
+            var chunkArr = new Uint8Array(chunk);
+            
+            for (var i = 0; i < chunkArr.length - 10; i++) {
+                if (chunkArr[i] == 0x90 && chunkArr[i+1] == 0x01) {
+                    var remaining = len - i;
+                    if (remaining > 5000 && remaining < 15000) {
+                        var sub = src.add(i).readByteArray(Math.min(remaining, 500));
+                        var subArr = new Uint8Array(sub);
+                        var subStr = "";
+                        for (var j = 0; j < subArr.length; j++) {
+                            if (subArr[j] >= 32 && subArr[j] < 127) {
+                                subStr += String.fromCharCode(subArr[j]);
                             }
                         }
-                        if (snippet.indexOf("UserId") != -1 || snippet.indexOf("RandomSeed") != -1) {
-                            console.log("[WRITE] Found 0x90 at offset " + i + ", fd=" + fd + ", len=" + len);
-                            console.log("[WRITE] snippet: " + snippet.substring(0, 100));
-                            
-                            var fullData = buf.readByteArray(len);
-                            var filename = "/tmp/cap746/write_90_" + (m90Count++) + ".bin";
-                            var f = new File(filename, "wb");
+                        
+                        if (subStr.indexOf("User") != -1) {
+                            console.log("[0x90 EMBEDDED] Found at offset " + i + " remaining=" + remaining);
+                            var fullData = src.add(i).readByteArray(remaining);
+                            var fname = "/tmp/cap746/m90_embedded_" + (packetCount++) + ".bin";
+                            var f = new File(fname, "wb");
                             f.write(fullData);
                             f.close();
-                            
-                            // Extract just the 0x90 portion
-                            var m90Len = len - i;
-                            var m90Data = buf.add(i).readByteArray(m90Len);
-                            var f2 = new File("/tmp/cap746/m90_packet.bin", "wb");
-                            f2.write(m90Data);
-                            f2.close();
-                            console.log("[0x90] Extracted " + m90Len + " bytes");
+                            console.log("[0x90] Saved embedded packet to " + fname);
                             got90 = true;
                             break;
                         }
                     }
                 }
-            } catch(e) {}
+            }
         }
+    } catch(e) {}
+}
+
+Interceptor.attach(memcpyAddr, {
+    onEnter: function(args) {
+        checkFor90Packet("memcpy", args[1], args[2].toInt32());
     }
 });
 
-// Also hook sendto
-Interceptor.attach(sendtoAddr, {
+Interceptor.attach(memmoveAddr, {
     onEnter: function(args) {
-        var fd = args[0].toInt32();
-        var buf = args[1];
-        var len = args[2].toInt32();
-        
-        if (len > 100 && len < 50000) {
+        checkFor90Packet("memmove", args[1], args[2].toInt32());
+    }
+});
+
+var reallocAddr = libc.getExportByName("realloc");
+Interceptor.attach(reallocAddr, {
+    onEnter: function(args) {
+        this.oldPtr = args[0];
+        this.newSize = args[1].toInt32();
+    },
+    onLeave: function(ret) {
+        if (this.newSize > 8000 && this.newSize < 15000 && !ret.isNull()) {
             try {
-                var data = buf.readByteArray(Math.min(len, 1024));
-                var arr = new Uint8Array(data);
-                
-                for (var i = 0; i < Math.min(100, arr.length - 20); i++) {
-                    if (arr[i] == 0x90) {
-                        var snippet = "";
-                        for (var j = i; j < Math.min(i + 200, arr.length); j++) {
-                            if (arr[j] >= 32 && arr[j] < 127) {
-                                snippet += String.fromCharCode(arr[j]);
-                            }
-                        }
-                        if (snippet.indexOf("UserId") != -1 || snippet.indexOf("RandomSeed") != -1) {
-                            console.log("[SENDTO] Found 0x90 at offset " + i + ", fd=" + fd + ", len=" + len);
-                            var fullData = buf.readByteArray(len);
-                            var f = new File("/tmp/cap746/sendto_90.bin", "wb");
-                            f.write(fullData);
-                            f.close();
-                            got90 = true;
-                            break;
-                        }
-                    }
+                var first2 = ret.readByteArray(2);
+                var arr = new Uint8Array(first2);
+                if (arr[0] == 0x90 && arr[1] == 0x01) {
+                    console.log("[realloc] Found 0x90 01 header in " + this.newSize + " byte alloc");
+                    checkFor90Packet("realloc", ret, this.newSize);
                 }
             } catch(e) {}
         }
@@ -149,69 +150,57 @@ Interceptor.attach(sendtoAddr, {
 });
 
 setInterval(function() {
-    var status = "m90=" + got90;
+    var status = "m90=" + got90 + " count=" + packetCount;
     var f = new File("/tmp/cap746/status.txt", "w");
     f.write(status);
     f.close();
 }, 2000);
 
-console.log("[FRIDA] Hooks installed. Join a game to capture 0x90 packet.");
-'''.replace("BASE_PLACEHOLDER", hex(base))
+console.log("[FRIDA] 0x90 packet capture hooks installed");
+console.log("[FRIDA] Looking for packets starting with 0x90 0x01 and containing FFlag strings");
+console.log("[FRIDA] Join a game now!");
+'''
     
     open("/tmp/frida_capture.js", "w").write(frida_script)
-    
-    # run frida, log to file
     cmd = f"timeout 120 frida -p {pid} -l /tmp/frida_capture.js > /tmp/cap746/frida.log 2>&1"
     os.system(cmd)
     sys.exit(0)
 
 # --- main entry point ---
 
-print("=== ROBLOX 746 CAPTURE ===", flush=True)
+print("=== ROBLOX 746 0x90 CAPTURE ===", flush=True)
 print("", flush=True)
 
-# check if capture already ran - show results
-if os.path.exists("/tmp/cap746/m90_packet.bin") or os.path.exists("/tmp/cap746/sendto_90.bin") or os.path.exists("/tmp/cap746/write_90_0.bin"):
+# check for results
+matches = glob.glob("/tmp/cap746/m90_*.bin") + glob.glob("/tmp/cap746/m90_embedded_*.bin")
+if matches:
     print("=== CAPTURE RESULTS ===", flush=True)
     rc, out = sh("ls -la /tmp/cap746/")
     print(out, flush=True)
     print("", flush=True)
     
-    if os.path.exists("/tmp/cap746/status.txt"):
-        print("Status:", open("/tmp/cap746/status.txt").read(), flush=True)
-    
-    for fname in ["m90_packet.bin", "sendto_90.bin", "write_90_0.bin"]:
-        fpath = f"/tmp/cap746/{fname}"
-        if os.path.exists(fpath):
-            sz = os.path.getsize(fpath)
-            with open(fpath, "rb") as f:
-                data = f.read()
-            print(f"{fname}: {sz} bytes", flush=True)
-            if fname == "m90_packet.bin":
-                print(f"  FULL HEX:", flush=True)
-                for i in range(0, min(len(data), 2048), 32):
-                    row = data[i:i+32]
-                    print(f"  {i:04x}: {row.hex()}", flush=True)
-                if len(data) > 2048:
-                    print(f"  ... ({len(data) - 2048} more bytes)", flush=True)
-            else:
-                print(f"  hex: {data[:128].hex()}", flush=True)
-            if len(data) > 0 and data[0] == 0x90:
-                print(f"  0x90 opcode confirmed", flush=True)
+    for fpath in sorted(matches):
+        sz = os.path.getsize(fpath)
+        with open(fpath, "rb") as f:
+            data = f.read()
+        fname = os.path.basename(fpath)
+        print(f"{fname}: {sz} bytes", flush=True)
+        print(f"  First 64 bytes: {data[:64].hex()}", flush=True)
+        if len(data) > 0 and data[0] == 0x90:
+            print(f"  ✓ 0x90 opcode confirmed", flush=True)
     
     if os.path.exists("/tmp/cap746/frida.log"):
         print("", flush=True)
-        print("=== FRIDA LOG (last 30 lines) ===", flush=True)
+        print("=== FRIDA LOG (last 20 lines) ===", flush=True)
         log = open("/tmp/cap746/frida.log").read()
         lines = log.strip().split('\n')
-        print('\n'.join(lines[-30:]), flush=True)
+        print('\n'.join(lines[-20:]), flush=True)
     
     sys.exit(0)
 
-# check if capture is running but no results yet
+# check if running
 if os.path.exists("/tmp/cap746/status.txt"):
-    print("Capture already running...", flush=True)
-    print("", flush=True)
+    print("Capture running...", flush=True)
     print("Status:", open("/tmp/cap746/status.txt").read(), flush=True)
     
     if os.path.exists("/tmp/cap746/frida.log"):
@@ -219,47 +208,36 @@ if os.path.exists("/tmp/cap746/status.txt"):
         print("=== FRIDA LOG ===", flush=True)
         log = open("/tmp/cap746/frida.log").read()
         lines = log.strip().split('\n')
-        print('\n'.join(lines[-20:]), flush=True)
-    
-    if os.path.exists("/tmp/cap746/bg.log"):
-        print("", flush=True)
-        print("=== BG LOG ===", flush=True)
-        print(open("/tmp/cap746/bg.log").read()[-500:], flush=True)
+        print('\n'.join(lines[-15:]), flush=True)
     
     print("", flush=True)
-    print("No captures yet. Are you in a game?", flush=True)
-    print("To restart capture: rm -rf /tmp/cap746 then run again", flush=True)
+    print("No 0x90 packet yet. Join a game!", flush=True)
+    print("To restart: rm -rf /tmp/cap746 && run again", flush=True)
     sys.exit(0)
 
-# --- start new capture ---
-
-# check frida
+# start new capture
 rc, out = sh("which frida")
 if rc != 0:
     print("Installing frida-tools...", flush=True)
     sh("pip install frida-tools", timeout=120)
 
-# clean up old capture
 sh("rm -rf /tmp/cap746")
 os.makedirs("/tmp/cap746", exist_ok=True)
-os.chmod("/tmp/cap746", 0o777)  # world writable so frida can write
+os.chmod("/tmp/cap746", 0o777)
 
-# spawn ourselves in background with --bg flag
 script_path = os.path.abspath(__file__)
 cmd = f"nohup python3 {script_path} --bg > /tmp/cap746/bg.log 2>&1 &"
 os.system(cmd)
 
 time.sleep(1)
 
-# check if it started
 if os.path.exists("/tmp/cap746/status.txt"):
     status = open("/tmp/cap746/status.txt").read()
-    print(f"Capture started in background!", flush=True)
+    print(f"Capture started!", flush=True)
     print(f"Status: {status}", flush=True)
 else:
     print("Capture starting...", flush=True)
 
 print("", flush=True)
-print("NOW JOIN A GAME! The capture is running in background.", flush=True)
-print("", flush=True)
-print("Run /capture again to check results.", flush=True)
+print("NOW JOIN A GAME!", flush=True)
+print("Run /capture again to check for 0x90 packet.", flush=True)
