@@ -1,16 +1,9 @@
 #!/usr/bin/env python3
 """
-Capture challenge blob from 746 Roblox client.
+Capture challenge blob from 746 Roblox client using Frida.
+Frida hooks don't pause the process - game runs normally.
 
-RUN THIS BEFORE JOINING A GAME. The challenge is sent when connecting to a
-game server, not when Roblox is sitting on the home screen.
-
-Flow:
-1. Run this script right after @@READY (Roblox on home screen)
-2. Script attaches gdb and sets breakpoints
-3. Join a game through the web UI
-4. Challenge arrives, script captures it
-5. Script detaches after capture or 90s timeout
+RUN THIS BEFORE JOINING A GAME.
 """
 import subprocess
 import os
@@ -21,12 +14,18 @@ def sh(cmd, timeout=120):
     r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
     return r.returncode, (r.stdout + r.stderr).strip()
 
-print("=== ROBLOX 746 CHALLENGE CAPTURE ===", flush=True)
+print("=== ROBLOX 746 CHALLENGE CAPTURE (Frida) ===", flush=True)
 print("", flush=True)
-print("This script attaches BEFORE you join a game.", flush=True)
-print("Once attached, JOIN A GAME through the Roblox UI.", flush=True)
-print("The challenge will be captured when the connection happens.", flush=True)
-print("", flush=True)
+
+# install frida if needed
+print("Checking frida...", flush=True)
+rc, out = sh("pip show frida-tools")
+if rc != 0:
+    print("Installing frida-tools...", flush=True)
+    rc, out = sh("pip install frida-tools", timeout=120)
+    if rc != 0:
+        print(f"ERROR: failed to install frida: {out}", flush=True)
+        sys.exit(1)
 
 # find cordial-run with libroblox
 rc, out = sh("pgrep -f cordial-run")
@@ -56,187 +55,131 @@ print(f"libroblox.so base: {hex(base)}", flush=True)
 
 os.makedirs("/tmp/cap746", exist_ok=True)
 
-# 746 offsets (verified correct - shows proper function prologues)
-BLOB_OFF = 0x427a7d4   # challenge blob decoder
-A7_OFF = 0x6152814     # A7 packet builder
-
-BLOB_ADDR = base + BLOB_OFF
-A7_ADDR = base + A7_OFF
+# 746 offsets
+BLOB_OFF = 0x427a7d4
+A7_OFF = 0x6152814
 
 print(f"", flush=True)
-print(f"Breakpoints:", flush=True)
-print(f"  Challenge decoder: {hex(BLOB_ADDR)}", flush=True)
-print(f"  A7 builder:        {hex(A7_ADDR)}", flush=True)
+print(f"Hooks:", flush=True)
+print(f"  Challenge decoder: base + {hex(BLOB_OFF)}", flush=True)
+print(f"  A7 builder:        base + {hex(A7_OFF)}", flush=True)
 print(f"", flush=True)
 
-# gdb script - captures challenge and A7, runs until both captured or 90s timeout
-# NOTE: non-stop mode is set via -ex flags before attach
-gdb_script = f'''set pagination off
-set confirm off
-set print thread-events off
+# frida script
+frida_script = '''
+const BLOB_OFF = 0x427a7d4;
+const A7_OFF = 0x6152814;
 
-python
-import os, time
-os.makedirs("/tmp/cap746", exist_ok=True)
-start_time = time.time()
-got_chal = False
-got_a7 = False
-chal_preview = ""
-end
+var libroblox = Process.getModuleByName("libroblox.so");
+var base = libroblox.base;
 
-printf "\\n[GDB] Breakpoints set, game running. NOW JOIN A GAME!\\n"
-printf "[GDB] Waiting up to 90 seconds for challenge...\\n\\n"
+console.log("[FRIDA] libroblox.so base: " + base);
+console.log("[FRIDA] Hooks installed. JOIN A GAME NOW!");
+console.log("[FRIDA] Game keeps running - no freeze.");
 
-# breakpoint 1: challenge blob decoder
-# rsi = pointer to std::string containing the challenge blob
-break *{hex(BLOB_ADDR)}
-commands 1
-silent
-python
-import gdb, time
-global got_chal, chal_preview
-if not got_chal:
-    elapsed = time.time() - start_time
-    rsi = int(gdb.parse_and_eval("$rsi"))
-    try:
-        # std::string layout: flag byte at [0], if flag&1 then heap (ptr at +16, len at +8), else SSO (len = flag>>1, data at +1)
-        flag = int.from_bytes(gdb.selected_inferior().read_memory(rsi, 1).tobytes(), "little")
-        if flag & 1:
-            ptr = int.from_bytes(gdb.selected_inferior().read_memory(rsi+16, 8).tobytes(), "little")
-            ln = int.from_bytes(gdb.selected_inferior().read_memory(rsi+8, 8).tobytes(), "little")
-        else:
-            ln = flag >> 1
-            ptr = rsi + 1
-        if 0 < ln < 100000:
-            blob = gdb.selected_inferior().read_memory(ptr, ln).tobytes()
-            open("/tmp/cap746/challenge.bin", "wb").write(blob)
-            chal_preview = blob[:48].hex()
-            print(f"\\n[CHALLENGE CAPTURED] +{{elapsed:.1f}}s, {{ln}} bytes")
-            print(f"  Preview: {{chal_preview}}...")
-            got_chal = True
-            # check if we have both
-            if got_a7:
-                print("\\n[DONE] Both challenge and A7 captured!")
-                gdb.execute("detach")
-    except Exception as e:
-        print(f"[CHAL ERR] {{e}}")
-end
-continue -a &
-end
+var gotChal = false;
+var gotA7 = false;
 
-# breakpoint 2: A7 packet builder  
-# rdi = context pointer, rsi = some other param
-break *{hex(A7_ADDR)}
-commands 2
-silent
-python
-import gdb, time, json
-global got_a7
-if not got_a7:
-    elapsed = time.time() - start_time
-    try:
-        # dump registers
-        regs = {{}}
-        for r in ['rax','rbx','rcx','rdx','rsi','rdi','r8','r9','r10','r11','r12','r13','r14','r15','rsp','rbp']:
-            regs[r] = hex(int(gdb.parse_and_eval(f"${{r}}")))
+// Hook challenge blob decoder
+Interceptor.attach(base.add(BLOB_OFF), {
+    onEnter: function(args) {
+        if (gotChal) return;
         
-        rdi = int(gdb.parse_and_eval("$rdi"))
-        rsi = int(gdb.parse_and_eval("$rsi"))
+        // rsi (args[1]) is std::string pointer
+        var strPtr = args[1];
         
-        # dump context buffer
-        if 0x1000 < rdi < 0x800000000000:
-            ctx = gdb.selected_inferior().read_memory(rdi, 2048).tobytes()
-            open("/tmp/cap746/a7_context.bin", "wb").write(ctx)
+        try {
+            // read std::string - check flag byte
+            var flag = strPtr.readU8();
+            var ptr, len;
+            
+            if (flag & 1) {
+                // heap allocated: len at +8, ptr at +16
+                len = strPtr.add(8).readU64().toNumber();
+                ptr = strPtr.add(16).readPointer();
+            } else {
+                // SSO: len = flag >> 1, data at +1
+                len = flag >> 1;
+                ptr = strPtr.add(1);
+            }
+            
+            if (len > 0 && len < 100000) {
+                var blob = ptr.readByteArray(len);
+                var f = new File("/tmp/cap746/challenge.bin", "wb");
+                f.write(blob);
+                f.close();
+                
+                console.log("[CHALLENGE CAPTURED] " + len + " bytes");
+                console.log("  Preview: " + hexdump(ptr, {length: Math.min(48, len), header: false}));
+                gotChal = true;
+                
+                if (gotA7) {
+                    console.log("[DONE] Both captured!");
+                }
+            }
+        } catch (e) {
+            console.log("[CHAL ERR] " + e);
+        }
+    }
+});
+
+// Hook A7 builder
+Interceptor.attach(base.add(A7_OFF), {
+    onEnter: function(args) {
+        if (gotA7) return;
         
-        # dump what rsi points to (might be the hash data)
-        if 0x1000 < rsi < 0x800000000000:
-            rsi_data = gdb.selected_inferior().read_memory(rsi, 512).tobytes()
-            open("/tmp/cap746/a7_rsi.bin", "wb").write(rsi_data)
+        var rdi = args[0];
+        var rsi = args[1];
         
-        # dump stack
-        rsp = int(gdb.parse_and_eval("$rsp"))
-        stack = gdb.selected_inferior().read_memory(rsp, 1024).tobytes()
-        open("/tmp/cap746/a7_stack.bin", "wb").write(stack)
-        
-        # save registers
-        open("/tmp/cap746/a7_regs.json", "w").write(json.dumps(regs, indent=2))
-        
-        print(f"\\n[A7 CAPTURED] +{{elapsed:.1f}}s")
-        print(f"  rdi (context): {{regs['rdi']}}")
-        print(f"  rsi (param):   {{regs['rsi']}}")
-        got_a7 = True
-        
-        if got_chal:
-            print("\\n[DONE] Both challenge and A7 captured!")
-            gdb.execute("detach")
-    except Exception as e:
-        print(f"[A7 ERR] {{e}}")
-end
-continue -a &
-end
+        try {
+            // dump context
+            if (rdi.toInt32() > 0x1000) {
+                var ctx = rdi.readByteArray(2048);
+                var f = new File("/tmp/cap746/a7_context.bin", "wb");
+                f.write(ctx);
+                f.close();
+            }
+            
+            // dump rsi data
+            if (rsi.toInt32() > 0x1000) {
+                var rsiData = rsi.readByteArray(512);
+                var f2 = new File("/tmp/cap746/a7_rsi.bin", "wb");
+                f2.write(rsiData);
+                f2.close();
+            }
+            
+            console.log("[A7 CAPTURED]");
+            console.log("  rdi: " + rdi);
+            console.log("  rsi: " + rsi);
+            gotA7 = true;
+            
+            if (gotChal) {
+                console.log("[DONE] Both captured!");
+            }
+        } catch (e) {
+            console.log("[A7 ERR] " + e);
+        }
+    }
+});
 
-# watchdog thread
-python
-import threading
-
-def watchdog():
-    import time
-    time.sleep(90)
-    print("\\n[TIMEOUT] 90 seconds elapsed")
-    print(f"  Challenge captured: {{got_chal}}")
-    print(f"  A7 captured: {{got_a7}}")
-    # write summary
-    with open("/tmp/cap746/summary.txt", "w") as f:
-        f.write(f"timeout=true\\n")
-        f.write(f"challenge={{got_chal}}\\n")
-        f.write(f"a7={{got_a7}}\\n")
-        if chal_preview:
-            f.write(f"chal_preview={{chal_preview}}\\n")
-    try:
-        gdb.execute("detach", to_string=True)
-    except:
-        pass
-
-t = threading.Thread(target=watchdog, daemon=True)
-t.start()
-end
-
-# resume all threads
-continue -a &
-
-# keep gdb alive for 90 seconds (shell command blocks)
-shell sleep 90
-
-# if we get here, timeout
-detach
+// Status check every 10s
+setInterval(function() {
+    console.log("[STATUS] chal=" + gotChal + " a7=" + gotA7);
+}, 10000);
 '''
 
-open("/tmp/capture.gdb", "w").write(gdb_script)
+open("/tmp/frida_capture.js", "w").write(frida_script)
 
-# write a separate init file that runs FIRST to set non-stop mode
-init_script = '''set non-stop on
-set pagination off
-set confirm off
-'''
-open("/tmp/gdb_init", "w").write(init_script)
-
-print("Attaching gdb...", flush=True)
+print("Attaching frida (game will keep running)...", flush=True)
 print("=" * 50, flush=True)
 
-# use -ix to run init BEFORE anything, including attach
-cmd = f"timeout 100 gdb -batch -n -ix /tmp/gdb_init -p {pid} -x /tmp/capture.gdb 2>&1"
+# run frida for 90 seconds
+cmd = f"timeout 90 frida -p {pid} -l /tmp/frida_capture.js 2>&1"
 proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
 try:
     for line in proc.stdout:
-        line = line.rstrip()
-        # filter out thread spam
-        if line.startswith("[New ") or line.startswith("[Thread ") or line.startswith("[Switching"):
-            continue
-        if line.startswith("warning:") or line.startswith("Using host"):
-            continue
-        if line:
-            print(line, flush=True)
+        print(line.rstrip(), flush=True)
 except KeyboardInterrupt:
     print("\n[INTERRUPTED]", flush=True)
     proc.kill()
@@ -249,7 +192,6 @@ print("\n=== CAPTURED FILES ===", flush=True)
 rc, out = sh("ls -la /tmp/cap746/")
 print(out, flush=True)
 
-# show previews
 for fname in ["challenge.bin", "a7_context.bin"]:
     fpath = f"/tmp/cap746/{fname}"
     if os.path.exists(fpath):
@@ -258,7 +200,3 @@ for fname in ["challenge.bin", "a7_context.bin"]:
             data = f.read(64)
         print(f"\n{fname}: {sz} bytes", flush=True)
         print(f"  hex: {data.hex()}", flush=True)
-
-if os.path.exists("/tmp/cap746/a7_regs.json"):
-    print("\na7_regs.json:", flush=True)
-    print(open("/tmp/cap746/a7_regs.json").read(), flush=True)
