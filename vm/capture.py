@@ -172,9 +172,17 @@ if os.path.exists("/tmp/cap746/a7_packet.bin") or os.path.exists("/tmp/cap746/se
         if os.path.exists(fpath):
             sz = os.path.getsize(fpath)
             with open(fpath, "rb") as f:
-                data = f.read(128)
+                data = f.read()
             print(f"{fname}: {sz} bytes", flush=True)
-            print(f"  hex: {data.hex()}", flush=True)
+            # Print full hex for a7_packet.bin, first 128 for others
+            if fname == "a7_packet.bin":
+                print(f"  FULL HEX:", flush=True)
+                # Print in rows of 32 bytes
+                for i in range(0, len(data), 32):
+                    row = data[i:i+32]
+                    print(f"  {i:04x}: {row.hex()}", flush=True)
+            else:
+                print(f"  hex: {data[:128].hex()}", flush=True)
             # Parse A7 structure if it starts with a7
             if data[0] == 0xa7:
                 count = data[1]
