@@ -1,333 +1,220 @@
 #!/usr/bin/env python3
 """
-Capture 0x90 packet from 746 Roblox client.
-Uses Frida to hook the packet serialization before QUIC encryption.
+Capture 0x90 packet from 746 Roblox client using GDB.
+Based on prasoet-cmu's Boblox capture scripts.
 
-Strategy: The 0x90 packet contains a large JSON blob (~10KB) with FFlags.
-We hook functions that handle large buffers and scan for 90 01 header + JSON.
+The Frida approach failed - GDB is more reliable for this.
 """
 import subprocess
 import os
 import sys
 import time
 import glob
+import tempfile
 
 def sh(cmd, timeout=120):
     r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
     return r.returncode, (r.stdout + r.stderr).strip()
 
-print("=== ROBLOX 746 0x90 CAPTURE ===", flush=True)
-print("", flush=True)
+print("=== ROBLOX 746 0x90 CAPTURE (GDB) ===", flush=True)
 
 CAP_DIR = "/tmp/cap746"
 os.makedirs(CAP_DIR, exist_ok=True)
 
-# Check for results - any file with 90 header and FFlags
-results = glob.glob(f"{CAP_DIR}/m90_*.bin")
+# Check for existing results
+results = glob.glob(f"{CAP_DIR}/*_op90_*.bin")
 if results:
-    print("=== CAPTURE RESULTS ===", flush=True)
+    print("=== EXISTING CAPTURE RESULTS ===", flush=True)
     for fpath in sorted(results):
         with open(fpath, "rb") as f:
             data = f.read()
         fname = os.path.basename(fpath)
         print(f"{fname}: {len(data)} bytes", flush=True)
         print(f"  First 64: {data[:64].hex()}", flush=True)
-        if len(data) > 2 and data[0] == 0x90 and data[1] == 0x01:
-            print(f"  ✓ Valid 0x90 0x01 header", flush=True)
+        if len(data) > 2 and data[0] == 0x90:
+            print(f"  ✓ Valid 0x90 header", flush=True)
+    print("", flush=True)
+    print("To restart: rm -rf /tmp/cap746", flush=True)
     sys.exit(0)
 
-# Check status
-if os.path.exists(f"{CAP_DIR}/status.txt"):
-    status = open(f"{CAP_DIR}/status.txt").read()
-    print(f"Status: {status}", flush=True)
-    
-    if os.path.exists(f"{CAP_DIR}/frida.log"):
-        log = open(f"{CAP_DIR}/frida.log").read()
-        lines = log.strip().split('\n')
+# Check if capture is running
+rc, out = sh("pgrep -f 'gdb.*capture_90.gdb'")
+if rc == 0:
+    print("GDB capture already running, pid:", out, flush=True)
+    if os.path.exists(f"{CAP_DIR}/index.txt"):
         print("", flush=True)
-        print("=== FRIDA LOG (last 30) ===", flush=True)
-        print('\n'.join(lines[-30:]), flush=True)
-    
-    if "m90=false" in status:
-        print("", flush=True)
-        print("No 0x90 yet. Join a game!", flush=True)
-        print("To restart: rm -rf /tmp/cap746", flush=True)
+        print("=== CAPTURE LOG ===", flush=True)
+        print(open(f"{CAP_DIR}/index.txt").read()[-2000:], flush=True)
+    print("", flush=True)
+    print("Waiting for 0x90... join a game!", flush=True)
     sys.exit(0)
 
-# --- Start new capture ---
+# Find the Roblox process
+print("Finding Roblox process...", flush=True)
 
-print("Starting capture...", flush=True)
-
-# Clean
-sh("rm -rf /tmp/cap746")
-os.makedirs(CAP_DIR, exist_ok=True)
-os.chmod(CAP_DIR, 0o777)
-
-# Pre-create files that frida will write to
-for fname in ["status.txt", "frida.log"]:
-    fpath = f"{CAP_DIR}/{fname}"
-    open(fpath, "w").write("")
-    os.chmod(fpath, 0o666)
-
-# Find process
-rc, out = sh("pgrep -f cordial-run")
+rc, out = sh("pgrep -f 'cordial-run'")
 if rc != 0:
-    print("ERROR: No cordial-run process", flush=True)
+    rc, out = sh("pgrep -f 'libroblox'")
+if rc != 0:
+    print("ERROR: No Roblox process found", flush=True)
+    print("Start Roblox first, then run capture", flush=True)
     sys.exit(1)
 
 pids = [p.strip() for p in out.split('\n') if p.strip()]
-pid = None
-base = None
+print(f"Found pids: {pids}", flush=True)
 
-for p in pids:
-    rc, maps = sh(f"grep 'libroblox.so' /proc/{p}/maps 2>/dev/null | head -1")
-    if rc == 0 and maps:
-        pid = p
+# Find the one with libroblox.so loaded
+target_pid = None
+libroblox_base = None
+
+for pid in pids:
+    rc, maps = sh(f"cat /proc/{pid}/maps 2>/dev/null | grep -i libroblox | head -1")
+    if rc == 0 and maps and 'libroblox' in maps.lower():
+        target_pid = pid
+        # Parse base address (first field before the dash)
         base_hex = maps.split('-')[0]
-        base = int(base_hex, 16)
+        libroblox_base = int(base_hex, 16)
+        print(f"Found libroblox in pid {pid}", flush=True)
+        print(f"  Map line: {maps[:100]}", flush=True)
+        print(f"  Base: {hex(libroblox_base)}", flush=True)
         break
 
-if not pid:
-    print("ERROR: No libroblox.so process", flush=True)
+if not target_pid:
+    print("ERROR: No process has libroblox.so loaded", flush=True)
     sys.exit(1)
 
-print(f"Target: pid={pid} base={hex(base)}", flush=True)
+# The send function offset - this is from 739, may need adjustment for 746
+# If this doesn't work, we'll need to find the new offset
+SEND_OFFSET = 0x631BD58
 
-# Frida script - comprehensive packet capture
-# Hook at multiple levels to catch 0x90 before encryption
-frida_script = '''
-var got90 = false;
-var counter = 0;
+print(f"", flush=True)
+print(f"Target: pid={target_pid}, libroblox base={hex(libroblox_base)}", flush=True)
+print(f"Send function offset: {hex(SEND_OFFSET)} (from 739)", flush=True)
+print(f"Breakpoint will be at: {hex(libroblox_base + SEND_OFFSET)}", flush=True)
 
-// Find libroblox by reading /proc/self/maps
-var maps = null;
-try {
-    var f = new File("/proc/self/maps", "r");
-    maps = f.readLine();
-    var lines = "";
-    while (maps !== "") {
-        lines += maps;
-        maps = f.readLine();
-    }
-    f.close();
-    
-    // Find libroblox line
-    var librobloxBase = null;
-    lines.split("\\n").forEach(function(line) {
-        if (line.indexOf("libroblox") != -1 && librobloxBase === null) {
-            var addr = line.split("-")[0];
-            librobloxBase = ptr("0x" + addr);
-            console.log("[*] Found libroblox in maps: " + line.substring(0, 80));
-        }
-    });
-    
-    if (librobloxBase) {
-        console.log("[*] libroblox base: " + librobloxBase);
-    }
-} catch(e) {
-    console.log("[*] Could not read maps: " + e);
-}
+# Write the GDB script
+gdb_script = f'''# Auto-generated capture script
+set pagination off
+set confirm off
 
-// List all modules anyway
-console.log("[*] Loaded modules:");
-Process.enumerateModules().slice(0, 10).forEach(function(m) {
-    console.log("    " + m.name + " @ " + m.base + " size=" + m.size);
-});
+python
+import gdb, os
 
-// The 0x90 packet is built and then passed to the QUIC layer.
-// We need to intercept it at the serialization point.
+CAP_DIR = "{CAP_DIR}"
+os.makedirs(CAP_DIR, exist_ok=True)
+LOG = open(os.path.join(CAP_DIR, "index.txt"), "a", buffering=1)
 
-// Key insight from Boblox: the send function at offset 0x631BD58 receives:
-//   rdx = app (4 for game channel)
-//   rcx = chan (1 for reliable)  
-//   r8 = pointer to packet struct
-// The struct has the packet data at different offsets based on a flag.
+def u8(a):
+    return int.from_bytes(gdb.selected_inferior().read_memory(a, 1).tobytes(), "little")
 
-// For 746, we need to find the equivalent function.
-// Let's try hooking based on the pattern of app=4, chan=1 calls.
+def u64(a):
+    return int.from_bytes(gdb.selected_inferior().read_memory(a, 8).tobytes(), "little")
 
-// Strategy 1: Hook write() and look for packet patterns in data being written
-// to any fd (the QUIC socket or internal pipes)
+BASE = {hex(libroblox_base)}
+SEND_ADDR = BASE + {hex(SEND_OFFSET)}
+print(f"libroblox BASE={{hex(BASE)}}")
+print(f"Breakpoint at {{hex(SEND_ADDR)}}")
 
-var libc = Process.getModuleByName("libc.so.6");
+COUNTER = {{"n": 0}}
+GOT_90 = {{"v": False}}
 
-// Look for sendmsg - QUIC uses this for UDP
-var sendmsgAddr = libc.getExportByName("sendmsg");
-if (sendmsgAddr) {
-    Interceptor.attach(sendmsgAddr, {
-        onEnter: function(args) {
-            if (got90) return;
-            var fd = args[0].toInt32();
-            var msg = args[1];
-            try {
-                // msghdr->msg_iov
-                var iov = msg.add(Process.pointerSize * 2).readPointer();
-                var iovlen = msg.add(Process.pointerSize * 3).readUInt();
+class SendBp(gdb.Breakpoint):
+    """Capture packets. app=rdx&0xFF, chan=rcx, ns=r8"""
+    def stop(self):
+        try:
+            rdx, rcx, r8 = (int(gdb.parse_and_eval(r)) for r in ("$rdx", "$rcx", "$r8"))
+            app = rdx & 0xFF
+            chan = rcx & 0xFFFFFFFF
+            
+            # app=4 chan=1 is the reliable game channel
+            if app != 4 or chan != 1:
+                return False
+            
+            ns = r8
+            flag = u8(ns + 64)
+            if flag:
+                data_ptr = u64(ns + 32)
+                length = u64(ns + 40)
+            else:
+                data_ptr = u64(ns + 8)
+                length = u64(ns + 16) - data_ptr
+            consumed = u64(ns + 72)
+            begin = data_ptr + consumed
+            size = length - consumed if length >= consumed else 0
+            
+            if not (0 < size < 66000):
+                return False
+            
+            payload = gdb.selected_inferior().read_memory(begin, size).tobytes()
+            opcode = payload[0] if payload else 0
+            
+            idx = COUNTER["n"]
+            COUNTER["n"] += 1
+            
+            fn = os.path.join(CAP_DIR, f"msg_{{idx:04d}}_op{{opcode:02x}}_sz{{size}}.bin")
+            open(fn, "wb").write(payload)
+            
+            LOG.write(f"{{idx:04d}} opcode=0x{{opcode:02x}} size={{size}} -> {{fn}}\\n")
+            LOG.flush()
+            
+            print(f"CAPTURED: opcode=0x{{opcode:02x}} size={{size}}")
+            
+            if opcode == 0x90:
+                print(f"*** GOT 0x90! size={{size}} ***")
+                GOT_90["v"] = True
+                # Write marker file
+                open(os.path.join(CAP_DIR, "GOT_90"), "w").write(fn)
                 
-                for (var i = 0; i < Math.min(iovlen, 4); i++) {
-                    var iov_base = iov.add(i * Process.pointerSize * 2).readPointer();
-                    var iov_len = iov.add(i * Process.pointerSize * 2 + Process.pointerSize).readUInt();
-                    
-                    if (iov_len > 8000 && iov_len < 20000) {
-                        var first8 = iov_base.readByteArray(8);
-                        var arr = new Uint8Array(first8);
-                        // Check for 0x90 0x01 header
-                        if (arr[0] == 0x90 && arr[1] == 0x01) {
-                            console.log("[sendmsg] FOUND 0x90 packet! len=" + iov_len);
-                            var data = iov_base.readByteArray(iov_len);
-                            var f = new File("/tmp/cap746/m90_sendmsg.bin", "wb");
-                            f.write(data);
-                            f.close();
-                            got90 = true;
-                        }
-                    }
-                }
-            } catch(e) {}
-        }
-    });
-    console.log("[*] Hooked sendmsg");
-}
+        except Exception as e:
+            LOG.write(f"ERR {{e}}\\n")
+            print(f"ERROR: {{e}}")
+        return False
 
-// Strategy 2: Scan for pattern in allocated memory periodically
-// The 0x90 packet is built into a buffer that starts with 90 01 and has JSON
+SendBp(f"*{{SEND_ADDR}}", internal=False)
+print("Breakpoint set. Waiting for packets...")
+print(f"Output dir: {{CAP_DIR}}")
+LOG.write("=== GDB capture started ===\\n")
+LOG.flush()
+end
 
-function scanForPacket() {
-    if (got90) return;
-    console.log("[scan] Scanning heap for 0x90 packet...");
-    
-    var found = 0;
-    Process.enumerateRanges('rw-').forEach(function(range) {
-        if (got90 || found > 3) return;
-        if (range.size < 10000 || range.size > 100000000) return;
-        
-        try {
-            // Search for: 90 01 (the 0x90 packet header)
-            // More lenient pattern - just 90 01 followed by any bytes
-            Memory.scan(range.base, range.size, "90 01", {
-                onMatch: function(addr, size) {
-                    if (got90 || found > 10) return;
-                    try {
-                        // Read ahead and check for FFlag strings
-                        var preview = addr.readByteArray(500);
-                        var arr = new Uint8Array(preview);
-                        var str = "";
-                        for (var i = 0; i < arr.length; i++) {
-                            if (arr[i] >= 32 && arr[i] < 127) str += String.fromCharCode(arr[i]);
-                        }
-                        
-                        // Check for FFlag indicators
-                        if ((str.indexOf("User") != -1 && str.indexOf("Script") != -1) ||
-                            (str.indexOf("UserId") != -1) ||
-                            (str.indexOf("Integration") != -1)) {
-                            console.log("[scan] FOUND 0x90 at " + addr);
-                            console.log("[scan] Preview: " + str.substring(0, 100));
-                            found++;
-                            
-                            var data = addr.readByteArray(12000);
-                            var fname = "/tmp/cap746/m90_scan_" + counter + ".bin";
-                            counter++;
-                            var f = new File(fname, "wb");
-                            f.write(data);
-                            f.close();
-                            console.log("[scan] Saved " + fname);
-                            got90 = true;
-                        }
-                    } catch(e) {}
-                },
-                onComplete: function() {}
-            });
-        } catch(e) {}
-    });
-}
-
-// Run scans periodically
-setTimeout(scanForPacket, 2000);
-setTimeout(scanForPacket, 5000);
-setTimeout(scanForPacket, 10000);
-setTimeout(scanForPacket, 20000);
-setTimeout(scanForPacket, 40000);
-
-// Strategy 3: Hook large buffer allocations and watch for 90 01 header
-var mallocAddr = libc.getExportByName("malloc");
-var recentAllocs = [];
-
-Interceptor.attach(mallocAddr, {
-    onEnter: function(args) {
-        this.size = args[0].toInt32();
-    },
-    onLeave: function(ret) {
-        if (got90) return;
-        // Track allocations in the 0x90 packet size range
-        if (this.size > 9000 && this.size < 15000) {
-            recentAllocs.push({ptr: ret, size: this.size, time: Date.now()});
-            if (recentAllocs.length > 20) recentAllocs.shift();
-        }
-    }
-});
-
-// Check recent allocations for 0x90 content
-setInterval(function() {
-    if (got90) return;
-    recentAllocs.forEach(function(alloc) {
-        try {
-            var first4 = alloc.ptr.readByteArray(4);
-            var arr = new Uint8Array(first4);
-            if (arr[0] == 0x90 && arr[1] == 0x01) {
-                console.log("[malloc] Found 0x90 in recent alloc size=" + alloc.size);
-                var preview = alloc.ptr.readByteArray(200);
-                var parr = new Uint8Array(preview);
-                var str = "";
-                for (var i = 0; i < parr.length; i++) {
-                    if (parr[i] >= 32 && parr[i] < 127) str += String.fromCharCode(parr[i]);
-                }
-                if (str.indexOf("User") != -1) {
-                    console.log("[malloc] Confirmed FFlag content!");
-                    var data = alloc.ptr.readByteArray(alloc.size);
-                    var f = new File("/tmp/cap746/m90_malloc.bin", "wb");
-                    f.write(data);
-                    f.close();
-                    got90 = true;
-                }
-            }
-        } catch(e) {}
-    });
-}, 1000);
-
-// Status file
-setInterval(function() {
-    var status = "m90=" + got90 + " scans=" + counter;
-    var f = new File("/tmp/cap746/status.txt", "w");
-    f.write(status);
-    f.close();
-}, 2000);
-
-console.log("[*] 0x90 capture ready - join a game!");
+continue
 '''
 
-# Write and run frida
-script_path = f"{CAP_DIR}/capture.js"
+script_path = f"{CAP_DIR}/capture_90.gdb"
 with open(script_path, "w") as f:
-    f.write(frida_script)
-
-print("Attaching frida...", flush=True)
-
-# Make sure frida is installed
-rc, _ = sh("which frida")
-if rc != 0:
-    print("Installing frida-tools...", flush=True)
-    sh("pip install frida-tools", timeout=180)
-
-cmd = f"nohup timeout 180 frida -p {pid} -l {script_path} > {CAP_DIR}/frida.log 2>&1 &"
-os.system(cmd)
-
-time.sleep(2)
-
-if os.path.exists(f"{CAP_DIR}/frida.log"):
-    log = open(f"{CAP_DIR}/frida.log").read()
-    if "libroblox.so base" in log:
-        print("Frida attached!", flush=True)
-    print(log[:500], flush=True)
+    f.write(gdb_script)
 
 print("", flush=True)
-print("NOW JOIN A GAME!", flush=True)
-print("Run /capture again to check for 0x90.", flush=True)
+print("Starting GDB capture...", flush=True)
+
+# Run GDB in background
+log_path = f"{CAP_DIR}/gdb.log"
+cmd = f"nohup timeout 300 gdb -p {target_pid} -x {script_path} -batch > {log_path} 2>&1 &"
+os.system(cmd)
+
+time.sleep(3)
+
+# Check if it started
+if os.path.exists(log_path):
+    log = open(log_path).read()
+    print("=== GDB OUTPUT ===", flush=True)
+    print(log[:1500] if len(log) > 1500 else log, flush=True)
+    
+    if "Breakpoint set" in log:
+        print("", flush=True)
+        print("✓ GDB attached and breakpoint set!", flush=True)
+        print("", flush=True)
+        print("NOW JOIN A GAME!", flush=True)
+        print("The 0x90 packet is sent early in the join sequence.", flush=True)
+        print("", flush=True)
+        print("Run this again to check for captured packets.", flush=True)
+    elif "Cannot attach" in log or "ptrace" in log:
+        print("", flush=True)
+        print("ERROR: GDB cannot attach (ptrace blocked)", flush=True)
+        print("Try: echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope", flush=True)
+    elif "No symbol" in log or "Cannot insert breakpoint" in log:
+        print("", flush=True)
+        print("ERROR: Breakpoint failed - offset may be wrong for 746", flush=True)
+        print("The 739 offset 0x631BD58 may not work on 746.", flush=True)
+else:
+    print("ERROR: GDB did not start", flush=True)
