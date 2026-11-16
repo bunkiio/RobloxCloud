@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Capture challenge blob from 746 Roblox client using Frida.
-Frida hooks don't pause the process - game runs normally.
+Runs in background so it doesn't block the streamer.
 
 RUN THIS BEFORE JOINING A GAME.
 """
@@ -14,68 +14,39 @@ def sh(cmd, timeout=120):
     r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
     return r.returncode, (r.stdout + r.stderr).strip()
 
-print("=== ROBLOX 746 CHALLENGE CAPTURE (Frida) ===", flush=True)
-print("", flush=True)
-
-# install frida if needed
-print("Checking frida...", flush=True)
-rc, out = sh("pip show frida-tools")
-if rc != 0:
-    print("Installing frida-tools...", flush=True)
-    rc, out = sh("pip install frida-tools", timeout=120)
-    if rc != 0:
-        print(f"ERROR: failed to install frida: {out}", flush=True)
+# if called with --bg, we're the background worker
+if "--bg" in sys.argv:
+    # this is the actual capture logic
+    os.makedirs("/tmp/cap746", exist_ok=True)
+    
+    # find cordial-run with libroblox
+    rc, out = sh("pgrep -f cordial-run")
+    pids = [p for p in out.strip().split('\n') if p.strip()]
+    
+    pid = None
+    base = None
+    for p in pids:
+        rc, maps = sh(f"grep 'libroblox.so' /proc/{p}/maps 2>/dev/null | head -1")
+        if rc == 0 and maps:
+            pid = p
+            base_hex = maps.split('-')[0]
+            base = int(base_hex, 16)
+            break
+    
+    if not pid:
+        open("/tmp/cap746/error.txt", "w").write("no libroblox process found")
         sys.exit(1)
-
-# find cordial-run with libroblox
-rc, out = sh("pgrep -f cordial-run")
-pids = [p for p in out.strip().split('\n') if p.strip()]
-print(f"Found cordial-run PIDs: {pids}", flush=True)
-
-if not pids:
-    print("ERROR: cordial-run not running. Is Roblox open?", flush=True)
-    sys.exit(1)
-
-pid = None
-base = None
-for p in pids:
-    rc, maps = sh(f"grep 'libroblox.so' /proc/{p}/maps 2>/dev/null | head -1")
-    if rc == 0 and maps:
-        pid = p
-        base_hex = maps.split('-')[0]
-        base = int(base_hex, 16)
-        break
-
-if not pid:
-    print("ERROR: no process has libroblox.so loaded", flush=True)
-    sys.exit(1)
-
-print(f"Target PID: {pid}", flush=True)
-print(f"libroblox.so base: {hex(base)}", flush=True)
-
-os.makedirs("/tmp/cap746", exist_ok=True)
-
-# 746 offsets
-BLOB_OFF = 0x427a7d4
-A7_OFF = 0x6152814
-
-print(f"", flush=True)
-print(f"Hooks:", flush=True)
-print(f"  Challenge decoder: base + {hex(BLOB_OFF)}", flush=True)
-print(f"  A7 builder:        base + {hex(A7_OFF)}", flush=True)
-print(f"", flush=True)
-
-# frida script
-frida_script = '''
+    
+    open("/tmp/cap746/status.txt", "w").write(f"attached pid={pid} base={hex(base)}\n")
+    
+    # frida script - pass base address directly since module lookup fails
+    frida_script = f'''
 const BLOB_OFF = 0x427a7d4;
 const A7_OFF = 0x6152814;
+const BASE = ptr("{hex(base)}");
 
-var libroblox = Process.getModuleByName("libroblox.so");
-var base = libroblox.base;
-
-console.log("[FRIDA] libroblox.so base: " + base);
-console.log("[FRIDA] Hooks installed. JOIN A GAME NOW!");
-console.log("[FRIDA] Game keeps running - no freeze.");
+var base = BASE;
+console.log("[FRIDA] Using base: " + base);
 
 var gotChal = false;
 var gotA7 = false;
@@ -84,38 +55,24 @@ var gotA7 = false;
 Interceptor.attach(base.add(BLOB_OFF), {
     onEnter: function(args) {
         if (gotChal) return;
-        
-        // rsi (args[1]) is std::string pointer
         var strPtr = args[1];
-        
         try {
-            // read std::string - check flag byte
             var flag = strPtr.readU8();
             var ptr, len;
-            
             if (flag & 1) {
-                // heap allocated: len at +8, ptr at +16
                 len = strPtr.add(8).readU64().toNumber();
                 ptr = strPtr.add(16).readPointer();
             } else {
-                // SSO: len = flag >> 1, data at +1
                 len = flag >> 1;
                 ptr = strPtr.add(1);
             }
-            
             if (len > 0 && len < 100000) {
                 var blob = ptr.readByteArray(len);
                 var f = new File("/tmp/cap746/challenge.bin", "wb");
                 f.write(blob);
                 f.close();
-                
-                console.log("[CHALLENGE CAPTURED] " + len + " bytes");
-                console.log("  Preview: " + hexdump(ptr, {length: Math.min(48, len), header: false}));
+                console.log("[CHAL] " + len + " bytes");
                 gotChal = true;
-                
-                if (gotA7) {
-                    console.log("[DONE] Both captured!");
-                }
             }
         } catch (e) {
             console.log("[CHAL ERR] " + e);
@@ -127,76 +84,80 @@ Interceptor.attach(base.add(BLOB_OFF), {
 Interceptor.attach(base.add(A7_OFF), {
     onEnter: function(args) {
         if (gotA7) return;
-        
         var rdi = args[0];
         var rsi = args[1];
-        
         try {
-            // dump context
             if (rdi.toInt32() > 0x1000) {
                 var ctx = rdi.readByteArray(2048);
                 var f = new File("/tmp/cap746/a7_context.bin", "wb");
                 f.write(ctx);
                 f.close();
             }
-            
-            // dump rsi data
             if (rsi.toInt32() > 0x1000) {
                 var rsiData = rsi.readByteArray(512);
                 var f2 = new File("/tmp/cap746/a7_rsi.bin", "wb");
                 f2.write(rsiData);
                 f2.close();
             }
-            
-            console.log("[A7 CAPTURED]");
-            console.log("  rdi: " + rdi);
-            console.log("  rsi: " + rsi);
+            console.log("[A7] captured");
             gotA7 = true;
-            
-            if (gotChal) {
-                console.log("[DONE] Both captured!");
-            }
         } catch (e) {
             console.log("[A7 ERR] " + e);
         }
     }
 });
 
-// Status check every 10s
 setInterval(function() {
-    console.log("[STATUS] chal=" + gotChal + " a7=" + gotA7);
-}, 10000);
+    var status = "chal=" + gotChal + " a7=" + gotA7;
+    var f = new File("/tmp/cap746/status.txt", "w");
+    f.write(status);
+    f.close();
+    if (gotChal && gotA7) {
+        console.log("[DONE]");
+    }
+}, 2000);
 '''
+    
+    open("/tmp/frida_capture.js", "w").write(frida_script)
+    
+    # run frida, log to file
+    cmd = f"timeout 120 frida -p {pid} -l /tmp/frida_capture.js > /tmp/cap746/frida.log 2>&1"
+    os.system(cmd)
+    sys.exit(0)
 
-open("/tmp/frida_capture.js", "w").write(frida_script)
+# --- main entry point: spawn background worker and return immediately ---
 
-print("Attaching frida (game will keep running)...", flush=True)
-print("=" * 50, flush=True)
+print("=== ROBLOX 746 CAPTURE ===", flush=True)
+print("", flush=True)
 
-# run frida for 90 seconds
-cmd = f"timeout 90 frida -p {pid} -l /tmp/frida_capture.js 2>&1"
-proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+# check frida
+rc, out = sh("which frida")
+if rc != 0:
+    print("Installing frida-tools...", flush=True)
+    sh("pip install frida-tools", timeout=120)
 
-try:
-    for line in proc.stdout:
-        print(line.rstrip(), flush=True)
-except KeyboardInterrupt:
-    print("\n[INTERRUPTED]", flush=True)
-    proc.kill()
+# clean up old capture
+sh("rm -rf /tmp/cap746")
+os.makedirs("/tmp/cap746", exist_ok=True)
 
-proc.wait()
-print("=" * 50, flush=True)
+# spawn ourselves in background with --bg flag
+script_path = os.path.abspath(__file__)
+cmd = f"nohup python3 {script_path} --bg > /tmp/cap746/bg.log 2>&1 &"
+os.system(cmd)
 
-# show results
-print("\n=== CAPTURED FILES ===", flush=True)
-rc, out = sh("ls -la /tmp/cap746/")
-print(out, flush=True)
+time.sleep(1)
 
-for fname in ["challenge.bin", "a7_context.bin"]:
-    fpath = f"/tmp/cap746/{fname}"
-    if os.path.exists(fpath):
-        sz = os.path.getsize(fpath)
-        with open(fpath, "rb") as f:
-            data = f.read(64)
-        print(f"\n{fname}: {sz} bytes", flush=True)
-        print(f"  hex: {data.hex()}", flush=True)
+# check if it started
+if os.path.exists("/tmp/cap746/status.txt"):
+    status = open("/tmp/cap746/status.txt").read()
+    print(f"Capture started in background!", flush=True)
+    print(f"Status: {status}", flush=True)
+else:
+    print("Capture starting...", flush=True)
+
+print("", flush=True)
+print("NOW JOIN A GAME! The capture is running in background.", flush=True)
+print("", flush=True)
+print("Check progress: cat /tmp/cap746/status.txt", flush=True)
+print("View log: cat /tmp/cap746/frida.log", flush=True)
+print("Results will be in /tmp/cap746/", flush=True)
