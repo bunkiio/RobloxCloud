@@ -40,10 +40,11 @@ if "--bg" in sys.argv:
     open("/tmp/cap746/status.txt", "w").write(f"attached pid={pid} base={hex(base)}\n")
     
     # frida script - pass base address directly since module lookup fails
-    frida_script = f'''
+    # use .format() to avoid f-string escaping hell
+    frida_script = '''
 const BLOB_OFF = 0x427a7d4;
 const A7_OFF = 0x6152814;
-const BASE = ptr("{hex(base)}");
+const BASE = ptr("BASE_PLACEHOLDER");
 
 var base = BASE;
 console.log("[FRIDA] Using base: " + base);
@@ -116,7 +117,7 @@ setInterval(function() {
         console.log("[DONE]");
     }
 }, 2000);
-'''
+'''.replace("BASE_PLACEHOLDER", hex(base))
     
     open("/tmp/frida_capture.js", "w").write(frida_script)
     
