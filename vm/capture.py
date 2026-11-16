@@ -70,11 +70,10 @@ print(f"  A7 builder:        {hex(A7_ADDR)}", flush=True)
 print(f"", flush=True)
 
 # gdb script - captures challenge and A7, runs until both captured or 90s timeout
+# NOTE: non-stop mode is set via -ex flags before attach
 gdb_script = f'''set pagination off
 set confirm off
 set print thread-events off
-set non-stop on
-set target-async on
 
 python
 import os, time
@@ -84,9 +83,6 @@ got_chal = False
 got_a7 = False
 chal_preview = ""
 end
-
-# resume all threads immediately after attach
-continue -a &
 
 printf "\\n[GDB] Breakpoints set, game running. NOW JOIN A GAME!\\n"
 printf "[GDB] Waiting up to 90 seconds for challenge...\\n\\n"
@@ -125,7 +121,7 @@ if not got_chal:
     except Exception as e:
         print(f"[CHAL ERR] {{e}}")
 end
-continue
+continue -a &
 end
 
 # breakpoint 2: A7 packet builder  
@@ -176,7 +172,7 @@ if not got_a7:
     except Exception as e:
         print(f"[A7 ERR] {{e}}")
 end
-continue
+continue -a &
 end
 
 # watchdog thread
@@ -205,7 +201,8 @@ t = threading.Thread(target=watchdog, daemon=True)
 t.start()
 end
 
-continue
+# resume all threads and run in background (non-stop mode)
+continue -a &
 '''
 
 open("/tmp/capture.gdb", "w").write(gdb_script)
@@ -213,8 +210,8 @@ open("/tmp/capture.gdb", "w").write(gdb_script)
 print("Attaching gdb...", flush=True)
 print("=" * 50, flush=True)
 
-# run gdb, stream output in real time
-cmd = f"timeout 100 gdb -batch -n -p {pid} -x /tmp/capture.gdb 2>&1"
+# run gdb with non-stop mode set BEFORE attaching
+cmd = f"timeout 100 gdb -batch -n -ex 'set non-stop on' -ex 'set pagination off' -p {pid} -x /tmp/capture.gdb 2>&1"
 proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
 try:
