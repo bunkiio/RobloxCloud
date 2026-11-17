@@ -1,221 +1,204 @@
 #!/usr/bin/env python3
 """
-Capture 0x90 packet from 746 Roblox client using GDB.
-Based on prasoet-cmu's Boblox capture scripts.
+Capture 0x90 + A7 from the 746 Roblox client via GDB, for the RobloxCloud
+web endpoint (no shell on the VM). Every hit prints full diagnostics, and any
+captured packet is printed as base64 so it can be copied out of the browser.
 
-The Frida approach failed - GDB is more reliable for this.
+Send framer offset (746): 0x301E650  (ported from 739 0x631BD58 by
+string-anchor scan, cross-checked by prologue + 'ctrl' + struct offsets).
 """
-import subprocess
+import base64
+import glob
 import os
+import subprocess
 import sys
 import time
-import glob
-import tempfile
+
+CAP_DIR = "/tmp/cap746"
+SEND_OFFSET = 0x301E650
+os.makedirs(CAP_DIR, exist_ok=True)
+
 
 def sh(cmd, timeout=120):
     r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
     return r.returncode, (r.stdout + r.stderr).strip()
 
-print("=== ROBLOX 746 0x90 CAPTURE (GDB) ===", flush=True)
 
-CAP_DIR = "/tmp/cap746"
-os.makedirs(CAP_DIR, exist_ok=True)
+def banner(t):
+    print(f"\n=== {t} ===", flush=True)
 
-# Check for existing results
-results = glob.glob(f"{CAP_DIR}/*_op90_*.bin")
-if results:
-    print("=== EXISTING CAPTURE RESULTS ===", flush=True)
-    for fpath in sorted(results):
-        with open(fpath, "rb") as f:
-            data = f.read()
-        fname = os.path.basename(fpath)
-        print(f"{fname}: {len(data)} bytes", flush=True)
-        print(f"  First 64: {data[:64].hex()}", flush=True)
-        if len(data) > 2 and data[0] == 0x90:
-            print(f"  ✓ Valid 0x90 header", flush=True)
-    print("", flush=True)
-    print("To restart: rm -rf /tmp/cap746", flush=True)
-    sys.exit(0)
 
-# Check if capture is running
-rc, out = sh("pgrep -f 'gdb.*capture_90.gdb'")
-if rc == 0:
-    print("GDB capture already running, pid:", out, flush=True)
-    if os.path.exists(f"{CAP_DIR}/index.txt"):
-        print("", flush=True)
-        print("=== CAPTURE LOG ===", flush=True)
-        print(open(f"{CAP_DIR}/index.txt").read()[-2000:], flush=True)
-    print("", flush=True)
-    print("Waiting for 0x90... join a game!", flush=True)
-    sys.exit(0)
+def show_dir():
+    banner("FILES IN /tmp/cap746")
+    rc, out = sh(f"ls -la {CAP_DIR}")
+    print(out, flush=True)
 
-# Find the Roblox process
-print("Finding Roblox process...", flush=True)
 
-rc, out = sh("pgrep -f 'cordial-run'")
-if rc != 0:
-    rc, out = sh("pgrep -f 'libroblox'")
-if rc != 0:
-    print("ERROR: No Roblox process found", flush=True)
-    print("Start Roblox first, then run capture", flush=True)
-    sys.exit(1)
+def show_log():
+    for name in ("gdb.log", "index.txt"):
+        p = f"{CAP_DIR}/{name}"
+        if os.path.exists(p):
+            banner(name.upper())
+            txt = open(p, errors="replace").read()
+            print(txt[-3000:] if len(txt) > 3000 else txt, flush=True)
 
-pids = [p.strip() for p in out.split('\n') if p.strip()]
-print(f"Found pids: {pids}", flush=True)
 
-# Find the one with libroblox.so loaded
-target_pid = None
-libroblox_base = None
+def print_captures():
+    """Print any captured 0x90/A7 as base64 for copy-out. Returns True if found."""
+    files = sorted(glob.glob(f"{CAP_DIR}/*_op90_*.bin")) + \
+            sorted(glob.glob(f"{CAP_DIR}/*_opa7_*.bin"))
+    if not files:
+        return False
+    banner("CAPTURED PACKETS")
+    for fp in files:
+        data = open(fp, "rb").read()
+        name = os.path.basename(fp)
+        print(f"\n--- {name}  ({len(data)} bytes) ---", flush=True)
+        print(f"head: {data[:48].hex()}", flush=True)
+        valid = (data[:1].hex() in ("90", "a7"))
+        print(f"opcode 0x{data[:1].hex()}  valid: {valid}", flush=True)
+        print("BASE64 (copy everything between the lines):", flush=True)
+        print("----8<----", flush=True)
+        print(base64.b64encode(data).decode(), flush=True)
+        print("---->8----", flush=True)
+    print("\nTo install on your VPS, for each block run:", flush=True)
+    print("  echo 'PASTED_BASE64' | base64 -d > /opt/sandbox/Boblox/py/captures/NAME", flush=True)
+    print("  0x90 -> acct2_90.bin (or your account's template)", flush=True)
+    print("  a7   -> fresh_a7.bin", flush=True)
+    return True
 
-for pid in pids:
-    rc, maps = sh(f"cat /proc/{pid}/maps 2>/dev/null | grep -i libroblox | head -1")
-    if rc == 0 and maps and 'libroblox' in maps.lower():
-        target_pid = pid
-        # Parse base address (first field before the dash)
-        base_hex = maps.split('-')[0]
-        libroblox_base = int(base_hex, 16)
-        print(f"Found libroblox in pid {pid}", flush=True)
-        print(f"  Map line: {maps[:100]}", flush=True)
-        print(f"  Base: {hex(libroblox_base)}", flush=True)
-        break
 
-if not target_pid:
-    print("ERROR: No process has libroblox.so loaded", flush=True)
-    sys.exit(1)
+def gdb_alive():
+    rc, out = sh("pgrep -f 'gdb.*cap746'")
+    return [p for p in out.split("\n") if p.strip()] if rc == 0 else []
 
-# The send function offset.
-# 739: 0x631BD58  ->  746: 0x301E650 (found via string-anchor scan, cross-checked
-# by identical prologue + 'ctrl' constant + matching ns struct offsets).
-SEND_OFFSET = 0x301E650
 
-print(f"", flush=True)
-print(f"Target: pid={target_pid}, libroblox base={hex(libroblox_base)}", flush=True)
-print(f"Send function offset: {hex(SEND_OFFSET)} (746)", flush=True)
-print(f"Breakpoint will be at: {hex(libroblox_base + SEND_OFFSET)}", flush=True)
+def find_target():
+    """Return (pid, base) for the process with libroblox.so loaded."""
+    for pat in ("cordial-run", "cordial", "libroblox"):
+        rc, out = sh(f"pgrep -f '{pat}'")
+        if rc != 0:
+            continue
+        for pid in [p.strip() for p in out.split("\n") if p.strip()]:
+            rc2, maps = sh(f"grep -m1 -i libroblox /proc/{pid}/maps 2>/dev/null")
+            if rc2 == 0 and maps and "libroblox" in maps.lower():
+                base = int(maps.split("-")[0], 16)
+                return pid, base, maps.strip()
+    return None, None, None
 
-# Write the GDB script
-gdb_script = f'''# Auto-generated capture script
-set pagination off
+
+def write_gdb_script(base):
+    addr = base + SEND_OFFSET
+    script = f'''set pagination off
 set confirm off
-
 python
 import gdb, os
-
 CAP_DIR = "{CAP_DIR}"
-os.makedirs(CAP_DIR, exist_ok=True)
 LOG = open(os.path.join(CAP_DIR, "index.txt"), "a", buffering=1)
-
-def u8(a):
-    return int.from_bytes(gdb.selected_inferior().read_memory(a, 1).tobytes(), "little")
-
-def u64(a):
-    return int.from_bytes(gdb.selected_inferior().read_memory(a, 8).tobytes(), "little")
-
-BASE = {hex(libroblox_base)}
-SEND_ADDR = BASE + {hex(SEND_OFFSET)}
-print(f"libroblox BASE={{hex(BASE)}}")
-print(f"Breakpoint at {{hex(SEND_ADDR)}}")
-
-COUNTER = {{"n": 0}}
-GOT_90 = {{"v": False}}
-
-class SendBp(gdb.Breakpoint):
-    """Capture packets. app=rdx&0xFF, chan=rcx, ns=r8"""
+def u8(a): return int.from_bytes(gdb.selected_inferior().read_memory(a,1).tobytes(),"little")
+def u64(a): return int.from_bytes(gdb.selected_inferior().read_memory(a,8).tobytes(),"little")
+BASE={hex(base)}
+ADDR=BASE+{hex(SEND_OFFSET)}
+print("BASE="+hex(BASE)+" ADDR="+hex(ADDR))
+LOG.write("start BASE="+hex(BASE)+" ADDR="+hex(ADDR)+"\\n")
+C={{"n":0}}
+class Bp(gdb.Breakpoint):
     def stop(self):
         try:
-            rdx, rcx, r8 = (int(gdb.parse_and_eval(r)) for r in ("$rdx", "$rcx", "$r8"))
-            app = rdx & 0xFF
-            chan = rcx & 0xFFFFFFFF
-            
-            # app=4 chan=1 is the reliable game channel
-            if app != 4 or chan != 1:
-                return False
-            
-            ns = r8
-            flag = u8(ns + 64)
+            rdx=int(gdb.parse_and_eval("$rdx")); rcx=int(gdb.parse_and_eval("$rcx")); r8=int(gdb.parse_and_eval("$r8"))
+            app=rdx&0xFF; chan=rcx&0xFFFFFFFF
+            if app!=4 or chan!=1: return False
+            ns=r8; flag=u8(ns+64)
             if flag:
-                data_ptr = u64(ns + 32)
-                length = u64(ns + 40)
+                dp=u64(ns+32); length=u64(ns+40)
             else:
-                data_ptr = u64(ns + 8)
-                length = u64(ns + 16) - data_ptr
-            consumed = u64(ns + 72)
-            begin = data_ptr + consumed
-            size = length - consumed if length >= consumed else 0
-            
-            if not (0 < size < 66000):
-                return False
-            
-            payload = gdb.selected_inferior().read_memory(begin, size).tobytes()
-            opcode = payload[0] if payload else 0
-            
-            idx = COUNTER["n"]
-            COUNTER["n"] += 1
-            
-            fn = os.path.join(CAP_DIR, f"msg_{{idx:04d}}_op{{opcode:02x}}_sz{{size}}.bin")
-            open(fn, "wb").write(payload)
-            
-            LOG.write(f"{{idx:04d}} opcode=0x{{opcode:02x}} size={{size}} -> {{fn}}\\n")
-            LOG.flush()
-            
-            print(f"CAPTURED: opcode=0x{{opcode:02x}} size={{size}}")
-            
-            if opcode == 0x90:
-                print(f"*** GOT 0x90! size={{size}} ***")
-                GOT_90["v"] = True
-                # Write marker file
-                open(os.path.join(CAP_DIR, "GOT_90"), "w").write(fn)
-                
+                dp=u64(ns+8); length=u64(ns+16)-dp
+            consumed=u64(ns+72); begin=dp+consumed
+            size=length-consumed if length>=consumed else 0
+            if not (0<size<66000): return False
+            payload=gdb.selected_inferior().read_memory(begin,size).tobytes()
+            op=payload[0] if payload else 0
+            i=C["n"]; C["n"]+=1
+            fn=os.path.join(CAP_DIR,"msg_%04d_op%02x_sz%d.bin"%(i,op,size))
+            open(fn,"wb").write(payload)
+            LOG.write("%04d op=0x%02x size=%d -> %s\\n"%(i,op,size,fn))
+            print("CAPTURED op=0x%02x size=%d"%(op,size))
         except Exception as e:
-            LOG.write(f"ERR {{e}}\\n")
-            print(f"ERROR: {{e}}")
+            LOG.write("ERR "+str(e)+"\\n"); print("ERR "+str(e))
         return False
-
-SendBp(f"*{{SEND_ADDR}}", internal=False)
-print("Breakpoint set. Waiting for packets...")
-print(f"Output dir: {{CAP_DIR}}")
-LOG.write("=== GDB capture started ===\\n")
-LOG.flush()
+try:
+    Bp("*"+hex(ADDR), internal=False)
+    print("BREAKPOINT SET OK")
+    LOG.write("bp set ok\\n")
+except Exception as e:
+    print("BREAKPOINT FAILED: "+str(e))
+    LOG.write("bp fail "+str(e)+"\\n")
 end
-
 continue
 '''
+    with open(f"{CAP_DIR}/cap746.gdb", "w") as f:
+        f.write(script)
+    return f"{CAP_DIR}/cap746.gdb"
 
-script_path = f"{CAP_DIR}/capture_90.gdb"
-with open(script_path, "w") as f:
-    f.write(gdb_script)
 
-print("", flush=True)
-print("Starting GDB capture...", flush=True)
+def main():
+    print("=== ROBLOX 746 0x90/A7 CAPTURE (GDB) ===", flush=True)
+    print(f"send offset: {hex(SEND_OFFSET)}", flush=True)
 
-# Run GDB in background
-log_path = f"{CAP_DIR}/gdb.log"
-cmd = f"nohup timeout 300 gdb -p {target_pid} -x {script_path} -batch > {log_path} 2>&1 &"
-os.system(cmd)
+    # 1) Already captured? Show + base64 and stop.
+    if print_captures():
+        show_log()
+        print("\n[DONE] packets captured above. Copy the base64, then "
+              "'rm -rf /tmp/cap746' to reset.", flush=True)
+        return
 
-time.sleep(3)
+    # 2) Can GDB even attach here? Quick probe once.
+    probe_done = os.path.exists(f"{CAP_DIR}/.probed")
+    if not probe_done:
+        pid, base, maps = find_target()
+        if pid:
+            rc, out = sh(f"gdb -p {pid} -batch -ex 'printf \"ATTACH_OK\\n\"' -ex detach 2>&1", timeout=40)
+            open(f"{CAP_DIR}/attach_probe.txt", "w").write(out)
+            open(f"{CAP_DIR}/.probed", "w").write("1")
+            banner("GDB ATTACH PROBE")
+            print(out[-1500:], flush=True)
+            if "Operation not permitted" in out or "ptrace" in out.lower():
+                print("\n[!!] ptrace is BLOCKED on this VM — GDB cannot attach.", flush=True)
+                print("     The Colab container likely lacks CAP_SYS_PTRACE.", flush=True)
+                print("     Check: cat /proc/sys/kernel/yama/ptrace_scope", flush=True)
 
-# Check if it started
-if os.path.exists(log_path):
-    log = open(log_path).read()
-    print("=== GDB OUTPUT ===", flush=True)
-    print(log[:1500] if len(log) > 1500 else log, flush=True)
-    
-    if "Breakpoint set" in log:
-        print("", flush=True)
-        print("✓ GDB attached and breakpoint set!", flush=True)
-        print("", flush=True)
-        print("NOW JOIN A GAME!", flush=True)
-        print("The 0x90 packet is sent early in the join sequence.", flush=True)
-        print("", flush=True)
-        print("Run this again to check for captured packets.", flush=True)
-    elif "Cannot attach" in log or "ptrace" in log:
-        print("", flush=True)
-        print("ERROR: GDB cannot attach (ptrace blocked)", flush=True)
-        print("Try: echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope", flush=True)
-    elif "No symbol" in log or "Cannot insert breakpoint" in log:
-        print("", flush=True)
-        print("ERROR: Breakpoint failed - offset may be wrong for 746", flush=True)
-        print("The 739 offset 0x631BD58 may not work on 746.", flush=True)
-else:
-    print("ERROR: GDB did not start", flush=True)
+    # 3) Find target.
+    pid, base, maps = find_target()
+    if not pid:
+        banner("NO TARGET")
+        print("No process with libroblox.so. Is Roblox started / in a game?", flush=True)
+        show_dir()
+        return
+    banner("TARGET")
+    print(f"pid={pid} base={hex(base)}", flush=True)
+    print(f"map: {maps}", flush=True)
+    print(f"breakpoint VA: {hex(base + SEND_OFFSET)}", flush=True)
+
+    # 4) Start GDB if not already running.
+    alive = gdb_alive()
+    if alive:
+        banner("GDB STATUS")
+        print(f"gdb attached, pid(s): {alive}", flush=True)
+        print("If this pid changes every refresh, gdb is dying — see GDB.LOG below.", flush=True)
+    else:
+        script = write_gdb_script(base)
+        sh(f"rm -f {CAP_DIR}/gdb.log")
+        os.system(f"nohup timeout 600 gdb -p {pid} -x {script} -batch "
+                  f"> {CAP_DIR}/gdb.log 2>&1 &")
+        time.sleep(4)
+        banner("GDB STARTED")
+        print("launched; first output:", flush=True)
+
+    show_log()
+    show_dir()
+    print("\n[NEXT] stay in a game, then refresh this page.", flush=True)
+    print("       when it fires you'll see CAPTURED lines + base64 above.", flush=True)
+
+
+if __name__ == "__main__":
+    main()
