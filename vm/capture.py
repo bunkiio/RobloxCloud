@@ -83,13 +83,14 @@ if not target_pid:
     print("ERROR: No process has libroblox.so loaded", flush=True)
     sys.exit(1)
 
-# The send function offset - this is from 739, may need adjustment for 746
-# If this doesn't work, we'll need to find the new offset
-SEND_OFFSET = 0x631BD58
+# The send function offset.
+# 739: 0x631BD58  ->  746: 0x301E650 (found via string-anchor scan, cross-checked
+# by identical prologue + 'ctrl' constant + matching ns struct offsets).
+SEND_OFFSET = 0x301E650
 
 print(f"", flush=True)
 print(f"Target: pid={target_pid}, libroblox base={hex(libroblox_base)}", flush=True)
-print(f"Send function offset: {hex(SEND_OFFSET)} (from 739)", flush=True)
+print(f"Send function offset: {hex(SEND_OFFSET)} (746)", flush=True)
 print(f"Breakpoint will be at: {hex(libroblox_base + SEND_OFFSET)}", flush=True)
 
 # Write the GDB script
